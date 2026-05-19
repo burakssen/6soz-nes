@@ -68,21 +68,27 @@ pub fn step(self: *Nes) !Ppu.StepResult {
     self.connectDevices();
     self.latchInput();
     var cpu_bus = core.Bus.init(&self.bus);
+    self.bus.setCpuCycleParity(self.cpu.cycles);
     const cpu_cycles = try self.cpu.step(&cpu_bus);
     const dma_cycles = self.bus.takeDmaStallCycles();
-    const total_cpu_cycles = @as(u32, cpu_cycles) + dma_cycles;
+    var total_cpu_cycles = @as(u32, cpu_cycles) + dma_cycles;
     self.cpu.cycles += dma_cycles;
 
     var i: u32 = 0;
     while (i < total_cpu_cycles * 3) : (i += 1) {
         if (self.ppu.tick()) {
-            self.cpu.nmi(&cpu_bus);
+            total_cpu_cycles += self.cpu.nmi(&cpu_bus);
         }
+    }
+
+    const audio = self.apu.tick(total_cpu_cycles);
+    if (self.apu.pollIrq()) {
+        total_cpu_cycles += self.cpu.irq(&cpu_bus);
     }
 
     return .{
         .cycles = total_cpu_cycles,
-        .audio = self.apu.tick(total_cpu_cycles),
+        .audio = audio,
     };
 }
 

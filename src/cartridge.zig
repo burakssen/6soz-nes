@@ -27,6 +27,8 @@ pub fn load(allocator: std.mem.Allocator, data: []const u8) !Cartridge {
     const flags6 = data[6];
     const flags7 = data[7];
 
+    if ((flags7 & 0x0c) == 0x08) return error.UnsupportedNes2;
+
     const mapper_id = (flags7 & 0xf0) | (flags6 >> 4);
     if (mapper_id != 0) return error.UnsupportedMapper;
 
@@ -40,7 +42,7 @@ pub fn load(allocator: std.mem.Allocator, data: []const u8) !Cartridge {
     const prg_start = 16 + (if ((flags6 & 0x04) != 0) @as(usize, 512) else 0);
     const chr_start = prg_start + prg_size;
 
-    if (prg_size == 0) return error.IncompleteFile;
+    if (prg_size != prg_bank_size and prg_size != prg_bank_size * 2) return error.UnsupportedPrgSize;
     if (data.len < chr_start + chr_rom_size) return error.IncompleteFile;
 
     const prg_rom = try allocator.alloc(u8, prg_size);
@@ -130,4 +132,33 @@ test "rejects unsupported mapper" {
     data[6] = 0x10;
 
     try std.testing.expectError(error.UnsupportedMapper, Cartridge.load(allocator, data));
+}
+
+test "rejects NES 2.0 headers until parsed explicitly" {
+    const allocator = std.testing.allocator;
+    const prg_size = 16 * 1024;
+    const chr_size = 8 * 1024;
+
+    var data = try allocator.alloc(u8, 16 + prg_size + chr_size);
+    defer allocator.free(data);
+    @memset(data, 0);
+    @memcpy(data[0..4], "NES\x1a");
+    data[4] = 1;
+    data[5] = 1;
+    data[7] = 0x08;
+
+    try std.testing.expectError(error.UnsupportedNes2, Cartridge.load(allocator, data));
+}
+
+test "rejects mapper 0 PRG sizes other than 16KB or 32KB" {
+    const allocator = std.testing.allocator;
+
+    var data = try allocator.alloc(u8, 16 + 3 * prg_bank_size + chr_bank_size);
+    defer allocator.free(data);
+    @memset(data, 0);
+    @memcpy(data[0..4], "NES\x1a");
+    data[4] = 3;
+    data[5] = 1;
+
+    try std.testing.expectError(error.UnsupportedPrgSize, Cartridge.load(allocator, data));
 }

@@ -16,9 +16,11 @@ apu: ?*Apu = null,
 
 controller_state: [2]u8 = [_]u8{ 0, 0 },
 controller_shift: [2]u8 = [_]u8{ 0, 0 },
+controller_reads: [2]u8 = [_]u8{ 0, 0 },
 controller_strobe: bool = false,
 
 dma_stall_cycles: u16 = 0,
+cpu_cycle_is_odd: bool = false,
 
 pub fn read(self: *const Bus, addr: u16) u8 {
     return switch (addr) {
@@ -31,14 +33,12 @@ pub fn read(self: *const Bus, addr: u16) u8 {
         // APU & I/O
         0x4016 => blk: {
             const bus = @constCast(self);
-            const bit = if (bus.controller_strobe) bus.controller_state[0] & 1 else bus.controller_shift[0] & 1;
-            if (!bus.controller_strobe) bus.controller_shift[0] >>= 1;
+            const bit = bus.readControllerBit(0);
             break :blk 0x40 | bit;
         },
         0x4017 => blk: {
             const bus = @constCast(self);
-            const bit = if (bus.controller_strobe) bus.controller_state[1] & 1 else bus.controller_shift[1] & 1;
-            if (!bus.controller_strobe) bus.controller_shift[1] >>= 1;
+            const bit = bus.readControllerBit(1);
             break :blk 0x40 | bit;
         },
         0x4015 => if (self.apu) |apu| apu.readStatus() else 0,
@@ -66,13 +66,14 @@ pub fn write(self: *Bus, addr: u16, value: u8) void {
             while (i < 256) : (i += 1) {
                 self.ppu.oam[(self.ppu.oam_addr +% @as(u8, @truncate(i)))] = self.read(base + i);
             }
-            self.dma_stall_cycles += 513;
+            self.dma_stall_cycles += 513 + @as(u16, @intFromBool(self.cpu_cycle_is_odd));
         },
         0x4016 => {
             self.controller_strobe = (value & 1) != 0;
             if (self.controller_strobe) {
                 self.controller_shift[0] = self.controller_state[0];
                 self.controller_shift[1] = self.controller_state[1];
+                self.controller_reads = .{ 0, 0 };
             }
         },
         0x4000...0x4013, 0x4015, 0x4017 => {
@@ -99,6 +100,20 @@ pub fn takeDmaStallCycles(self: *Bus) u16 {
     const cycles = self.dma_stall_cycles;
     self.dma_stall_cycles = 0;
     return cycles;
+}
+
+pub fn setCpuCycleParity(self: *Bus, cycles: u64) void {
+    self.cpu_cycle_is_odd = (cycles & 1) != 0;
+}
+
+fn readControllerBit(self: *Bus, player: usize) u8 {
+    if (self.controller_strobe) return self.controller_state[player] & 1;
+    if (self.controller_reads[player] >= 8) return 1;
+
+    const bit = self.controller_shift[player] & 1;
+    self.controller_shift[player] >>= 1;
+    self.controller_reads[player] += 1;
+    return bit;
 }
 
 test "mirrors 2KB internal RAM" {
@@ -141,6 +156,8 @@ test "controller strobe latches and shifts button state" {
     for (expected) |bit| {
         try std.testing.expectEqual(@as(u8, 0x40 | bit), bus.read(0x4016));
     }
+    try std.testing.expectEqual(@as(u8, 0x41), bus.read(0x4016));
+    try std.testing.expectEqual(@as(u8, 0x41), bus.read(0x4016));
 }
 
 test "OAM DMA copies one CPU page and records stall cycles" {
@@ -159,6 +176,16 @@ test "OAM DMA copies one CPU page and records stall cycles" {
     try std.testing.expectEqual(@as(u8, 0xff), ppu.oam[0xff]);
     try std.testing.expectEqual(@as(u16, 513), bus.takeDmaStallCycles());
     try std.testing.expectEqual(@as(u16, 0), bus.takeDmaStallCycles());
+}
+
+test "OAM DMA records an extra stall cycle on odd CPU cycles" {
+    var ppu = Ppu{};
+    var bus = Bus{ .ppu = &ppu };
+    bus.setCpuCycleParity(1);
+
+    bus.write(0x4014, 0x02);
+
+    try std.testing.expectEqual(@as(u16, 514), bus.takeDmaStallCycles());
 }
 
 test "APU status register is routed through NES bus" {

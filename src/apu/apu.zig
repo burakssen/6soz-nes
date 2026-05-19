@@ -21,6 +21,8 @@ sample_accum: u32 = 0,
 frame_cycle_accum: u32 = 0,
 frame_step: u3 = 0,
 frame_mode_5_step: bool = false,
+frame_irq_inhibit: bool = false,
+frame_irq_pending: bool = false,
 pulse_noise_clock: bool = false,
 high_pass: DcBlocker = .{},
 low_pass: OnePoleLowPass = .{},
@@ -37,6 +39,8 @@ pub fn writeRegister(self: *Apu, addr: u16, value: u8) void {
         0x4015 => self.writeStatus(value),
         0x4017 => {
             self.frame_mode_5_step = (value & 0x80) != 0;
+            self.frame_irq_inhibit = (value & 0x40) != 0;
+            if (self.frame_irq_inhibit) self.frame_irq_pending = false;
             self.frame_step = 0;
             self.frame_cycle_accum = 0;
             if (self.frame_mode_5_step) {
@@ -48,11 +52,14 @@ pub fn writeRegister(self: *Apu, addr: u16, value: u8) void {
     }
 }
 
-pub fn readStatus(self: *const Apu) u8 {
-    return (if (self.pulse[0].length_counter != 0) @as(u8, 0x01) else 0) |
+pub fn readStatus(self: *Apu) u8 {
+    const status = (if (self.pulse[0].length_counter != 0) @as(u8, 0x01) else 0) |
         (if (self.pulse[1].length_counter != 0) @as(u8, 0x02) else 0) |
         (if (self.triangle.length_counter != 0) @as(u8, 0x04) else 0) |
-        (if (self.noise.length_counter != 0) @as(u8, 0x08) else 0);
+        (if (self.noise.length_counter != 0) @as(u8, 0x08) else 0) |
+        (if (self.frame_irq_pending) @as(u8, 0x40) else 0);
+    self.frame_irq_pending = false;
+    return status;
 }
 
 pub fn tick(self: *Apu, cpu_cycles: u32) []const f32 {
@@ -70,6 +77,10 @@ pub fn tick(self: *Apu, cpu_cycles: u32) []const f32 {
     }
 
     return self.samples[0..self.sample_count];
+}
+
+pub fn pollIrq(self: *const Apu) bool {
+    return self.frame_irq_pending;
 }
 
 fn writeStatus(self: *Apu, value: u8) void {
@@ -106,6 +117,9 @@ fn clockFrameSequencer(self: *Apu) void {
     self.clockQuarterFrame();
     if (self.frame_step == 1 or self.frame_step == 3) {
         self.clockHalfFrame();
+    }
+    if (!self.frame_mode_5_step and self.frame_step == 3 and !self.frame_irq_inhibit) {
+        self.frame_irq_pending = true;
     }
 
     const modulo: u3 = if (self.frame_mode_5_step) 5 else 4;
@@ -148,4 +162,22 @@ fn mixNes(pulse1: u4, pulse2: u4, triangle: u4, noise: u4) f32 {
     const pulse_out: f32 = if (pulse_sum == 0) 0 else 95.88 / ((8128.0 / pulse_sum) + 100.0);
     const tnd_out: f32 = if (tnd_sum == 0) 0 else 159.79 / ((1.0 / tnd_sum) + 100.0);
     return pulse_out + tnd_out;
+}
+
+test "4-step frame counter raises and status read clears frame IRQ" {
+    var apu = Apu{};
+    _ = apu.tick(frame_period * 4);
+
+    try std.testing.expect(apu.pollIrq());
+    try std.testing.expectEqual(@as(u8, 0x40), apu.readStatus() & 0x40);
+    try std.testing.expect(!apu.pollIrq());
+}
+
+test "frame IRQ inhibit clears and suppresses frame IRQ" {
+    var apu = Apu{};
+    apu.writeRegister(0x4017, 0x40);
+    _ = apu.tick(frame_period * 4);
+
+    try std.testing.expect(!apu.pollIrq());
+    try std.testing.expectEqual(@as(u8, 0), apu.readStatus() & 0x40);
 }

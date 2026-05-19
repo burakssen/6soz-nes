@@ -165,6 +165,10 @@ pub fn tick(self: *Ppu) bool {
             self.status &= 0x1F; // Clear flags
         }
 
+        if (self.scanline >= 0 and self.scanline < 240 and self.cycles == 1) {
+            self.evaluateSpriteOverflow(@as(u16, @intCast(self.scanline)));
+        }
+
         if ((self.cycles >= 2 and self.cycles < 258) or (self.cycles >= 321 and self.cycles < 338)) {
             self.updateShifters();
 
@@ -322,12 +326,13 @@ fn spritePixel(self: *Ppu, x_pos: u16, y_pos: u16) SpritePixel {
     if ((self.mask & 0x10) == 0) return .{};
     if (x_pos < 8 and (self.mask & 0x04) == 0) return .{};
 
+    const sprite_height: i16 = if ((self.ctrl & 0x20) != 0) 16 else 8;
     var i: usize = 0;
     while (i < 64) : (i += 1) {
         const base = i * 4;
         const sprite_y = @as(i16, self.oam[base]) + 1;
         const row = @as(i16, @intCast(y_pos)) - sprite_y;
-        if (row < 0 or row >= 8) continue;
+        if (row < 0 or row >= sprite_height) continue;
 
         const sprite_x = self.oam[base + 3];
         if (x_pos < sprite_x or x_pos >= @as(u16, sprite_x) + 8) continue;
@@ -335,11 +340,10 @@ fn spritePixel(self: *Ppu, x_pos: u16, y_pos: u16) SpritePixel {
         const attr = self.oam[base + 2];
         var tile_row = @as(u8, @intCast(row));
         var tile_col = @as(u8, @intCast(x_pos - sprite_x));
-        if ((attr & 0x80) != 0) tile_row = 7 - tile_row;
+        if ((attr & 0x80) != 0) tile_row = @as(u8, @intCast(sprite_height - 1)) - tile_row;
         if ((attr & 0x40) != 0) tile_col = 7 - tile_col;
 
-        const bank: u16 = if ((self.ctrl & 0x08) != 0) 0x1000 else 0;
-        const tile_addr = bank + (@as(u16, self.oam[base + 1]) << 4) + tile_row;
+        const tile_addr = self.spritePatternAddress(self.oam[base + 1], tile_row);
         const lo = self.vramRead(tile_addr);
         const hi = self.vramRead(tile_addr + 8);
         const shift = @as(u3, @intCast(7 - tile_col));
@@ -355,6 +359,35 @@ fn spritePixel(self: *Ppu, x_pos: u16, y_pos: u16) SpritePixel {
     }
 
     return .{};
+}
+
+fn spritePatternAddress(self: *const Ppu, tile: u8, row: u8) u16 {
+    if ((self.ctrl & 0x20) == 0) {
+        const bank: u16 = if ((self.ctrl & 0x08) != 0) 0x1000 else 0;
+        return bank + (@as(u16, tile) << 4) + row;
+    }
+
+    const bank: u16 = @as(u16, tile & 1) * 0x1000;
+    const tile_base = @as(u16, tile & 0xfe) << 4;
+    const tile_offset: u16 = if (row >= 8) 16 else 0;
+    return bank + tile_base + tile_offset + (row & 0x07);
+}
+
+fn evaluateSpriteOverflow(self: *Ppu, y_pos: u16) void {
+    const sprite_height: i16 = if ((self.ctrl & 0x20) != 0) 16 else 8;
+    var visible: u8 = 0;
+
+    for (0..64) |i| {
+        const sprite_y = @as(i16, self.oam[i * 4]) + 1;
+        const row = @as(i16, @intCast(y_pos)) - sprite_y;
+        if (row >= 0 and row < sprite_height) {
+            visible += 1;
+            if (visible > 8) {
+                self.status |= 0x20;
+                return;
+            }
+        }
+    }
 }
 
 const palette_table = [64]u32{
@@ -413,4 +446,26 @@ test "palette background entries mirror to universal background color" {
     ppu.writeRegister(0x2006, 0x3f);
     ppu.writeRegister(0x2006, 0x00);
     try std.testing.expectEqual(@as(u8, 0x22), ppu.readRegister(0x2007));
+}
+
+test "sprite overflow flag is set when more than eight sprites cover a scanline" {
+    var ppu = Ppu{};
+
+    for (0..9) |i| {
+        ppu.oam[i * 4] = 9;
+        ppu.oam[i * 4 + 3] = @as(u8, @intCast(i * 8));
+    }
+
+    ppu.evaluateSpriteOverflow(10);
+
+    try std.testing.expect((ppu.status & 0x20) != 0);
+}
+
+test "8x16 sprite pattern address uses tile bit zero as pattern table select" {
+    var ppu = Ppu{ .ctrl = 0x20 };
+
+    try std.testing.expectEqual(@as(u16, 0x0020), ppu.spritePatternAddress(0x02, 0));
+    try std.testing.expectEqual(@as(u16, 0x0030), ppu.spritePatternAddress(0x02, 8));
+    try std.testing.expectEqual(@as(u16, 0x1020), ppu.spritePatternAddress(0x03, 0));
+    try std.testing.expectEqual(@as(u16, 0x1030), ppu.spritePatternAddress(0x03, 8));
 }
