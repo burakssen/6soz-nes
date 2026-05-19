@@ -11,6 +11,12 @@ pub fn build(b: *std.Build) void {
 
     const core_mod = core_dep.module("core");
 
+    const cartridge_mod = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .root_source_file = b.path("src/cartridge/cartridge.zig"),
+    });
+
     const apu_mod = b.createModule(.{
         .target = target,
         .optimize = optimize,
@@ -21,6 +27,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .root_source_file = b.path("src/ppu/ppu.zig"),
+        .imports = &.{
+            .{ .name = "cartridge", .module = cartridge_mod },
+        },
     });
 
     const nes_mod = b.addModule("nes", .{
@@ -31,6 +40,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "core", .module = core_mod },
             .{ .name = "apu", .module = apu_mod },
             .{ .name = "ppu", .module = ppu_mod },
+            .{ .name = "cartridge", .module = cartridge_mod },
         },
     });
 
@@ -41,13 +51,8 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "apu", .module = apu_mod },
             .{ .name = "ppu", .module = ppu_mod },
+            .{ .name = "cartridge", .module = cartridge_mod },
         },
-    });
-
-    const cartridge_mod = b.createModule(.{
-        .target = target,
-        .optimize = optimize,
-        .root_source_file = b.path("src/cartridge.zig"),
     });
 
     const ppu_input_mod = b.createModule(.{

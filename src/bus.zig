@@ -3,13 +3,14 @@ const std = @import("std");
 const Ppu = @import("ppu");
 const Apu = @import("apu");
 
+const Cartridge = @import("cartridge");
+
 const Bus = @This();
 
 // NES RAM: 2KB mirrored
 ram: [2048]u8 = [_]u8{0} ** 2048,
 
-// PRG ROM - usually points to cartridge memory
-prg_rom: []const u8 = &.{},
+mapper: ?*Cartridge.Mapper = null,
 
 ppu: *Ppu,
 apu: ?*Apu = null,
@@ -44,13 +45,8 @@ pub fn read(self: *const Bus, addr: u16) u8 {
         0x4015 => if (self.apu) |apu| apu.readStatus() else 0,
         0x4000...0x4014 => 0,
 
-        // Cartridge space (usually starts at 0x4020, PRG ROM at 0x8000)
-        0x8000...0xffff => blk: {
-            if (self.prg_rom.len == 0) break :blk 0;
-            // Simple Mapper 0 (NROM) logic: 16KB mirrored or 32KB
-            const mask: u16 = if (self.prg_rom.len == 16384) 0x3fff else 0x7fff;
-            break :blk self.prg_rom[addr & mask];
-        },
+        // Cartridge space ($4020 - $FFFF)
+        0x4020...0xffff => if (self.mapper) |m| m.prgRead(addr) else 0,
 
         else => 0,
     };
@@ -79,6 +75,7 @@ pub fn write(self: *Bus, addr: u16, value: u8) void {
         0x4000...0x4013, 0x4015, 0x4017 => {
             if (self.apu) |apu| apu.writeRegister(addr, value);
         },
+        0x4020...0xffff => if (self.mapper) |m| m.prgWrite(addr, value),
         else => {},
     }
 }
@@ -131,9 +128,16 @@ test "mirrors 16KB NROM PRG ROM" {
     prg_rom[0] = 0xaa;
     prg_rom[0x3fff] = 0xbb;
 
+    var nrom = Cartridge.Mapper{ .nrom = .{
+        .prg_rom = &prg_rom,
+        .chr = &[_]u8{},
+        .chr_is_ram = true,
+        .mirroring_mode = .horizontal,
+    } };
+
     var bus = Bus{
         .ppu = &ppu,
-        .prg_rom = &prg_rom,
+        .mapper = &nrom,
     };
 
     try std.testing.expectEqual(@as(u8, 0xaa), bus.read(0x8000));

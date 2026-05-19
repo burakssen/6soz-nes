@@ -4,6 +4,8 @@ pub const Video = @import("video.zig");
 pub const InputState = @import("input_state.zig");
 pub const StepResult = @import("step_result.zig");
 
+const Cartridge = @import("cartridge");
+
 const Ppu = @This();
 
 pub const Mirroring = enum {
@@ -18,7 +20,7 @@ oam: [256]u8 = [_]u8{0} ** 256,
 // 32 bytes for Palettes
 palette: [32]u8 = [_]u8{0} ** 32,
 
-mirroring: Mirroring = .horizontal,
+mapper: ?*Cartridge.Mapper = null,
 
 // Registers
 ctrl: u8 = 0, // $2000
@@ -38,6 +40,7 @@ data_buffer: u8 = 0,
 cycles: u32 = 0,
 scanline: i16 = 0,
 nmi_occurred: bool = false,
+frame_complete: bool = false,
 
 // Background fetch buffers
 bg_next_nametable: u8 = 0,
@@ -51,8 +54,6 @@ bg_shifter_tile_hi: u16 = 0,
 bg_shifter_attrib_lo: u16 = 0,
 bg_shifter_attrib_hi: u16 = 0,
 
-chr: []u8 = &.{},
-chr_is_ram: bool = false,
 framebuffer: Video.Framebuffer = [_]u32{0} ** (Video.width * Video.height),
 
 pub fn readRegister(self: *Ppu, addr: u16) u8 {
@@ -119,16 +120,20 @@ pub fn writeRegister(self: *Ppu, addr: u16, val: u8) void {
 
 fn mirrorAddr(self: *const Ppu, addr: u16) u16 {
     const a = addr & 0x0FFF;
-    return switch (self.mirroring) {
+    const mirroring_mode = if (self.mapper) |m| m.mirroring() else .horizontal;
+    return switch (mirroring_mode) {
+        .single_screen_lower => a & 0x03FF,
+        .single_screen_upper => 0x0400 | (a & 0x03FF),
         .horizontal => if (a < 0x0800) a & 0x03FF else 0x0400 | (a & 0x03FF),
         .vertical => a & 0x07FF,
+        .four_screen => unreachable,
     };
 }
 
 fn vramRead(self: *Ppu, addr: u16) u8 {
     const a = addr & 0x3FFF;
     if (a < 0x2000) {
-        if (self.chr.len > 0) return self.chr[a % self.chr.len];
+        if (self.mapper) |m| return m.chrRead(a);
         return 0;
     }
     if (a < 0x3F00) return self.vram[self.mirrorAddr(a)];
@@ -141,7 +146,7 @@ fn vramRead(self: *Ppu, addr: u16) u8 {
 fn vramWrite(self: *Ppu, addr: u16, val: u8) void {
     const a = addr & 0x3FFF;
     if (a < 0x2000) {
-        if (self.chr_is_ram and self.chr.len > 0) self.chr[a % self.chr.len] = val;
+        if (self.mapper) |m| m.chrWrite(a, val);
     } else if (a < 0x3F00) {
         self.vram[self.mirrorAddr(a)] = val;
     } else if (a < 0x4000) {
@@ -216,12 +221,21 @@ pub fn tick(self: *Ppu) bool {
     if (self.cycles >= 341) {
         self.cycles = 0;
         self.scanline += 1;
-        if (self.scanline >= 261) self.scanline = -1;
+        if (self.scanline >= 261) {
+            self.scanline = -1;
+            self.frame_complete = true;
+        }
     }
 
     const nmi = self.nmi_occurred;
     self.nmi_occurred = false;
     return nmi;
+}
+
+pub fn takeFrameComplete(self: *Ppu) bool {
+    const completed = self.frame_complete;
+    self.frame_complete = false;
+    return completed;
 }
 
 fn updateShifters(self: *Ppu) void {
@@ -410,9 +424,14 @@ test "PPU register addresses mirror every 8 bytes" {
 
 test "CHR RAM is writable through PPU pattern memory" {
     var chr: [8 * 1024]u8 = [_]u8{0} ** (8 * 1024);
-    var ppu = Ppu{
+    var nrom = Cartridge.Mapper{ .nrom = .{
+        .prg_rom = &[_]u8{},
         .chr = &chr,
         .chr_is_ram = true,
+        .mirroring_mode = .horizontal,
+    } };
+    var ppu = Ppu{
+        .mapper = &nrom,
     };
 
     ppu.writeRegister(0x2006, 0x00);
@@ -424,9 +443,14 @@ test "CHR RAM is writable through PPU pattern memory" {
 
 test "CHR ROM ignores writes through PPU pattern memory" {
     var chr: [8 * 1024]u8 = [_]u8{0} ** (8 * 1024);
-    var ppu = Ppu{
+    var nrom = Cartridge.Mapper{ .nrom = .{
+        .prg_rom = &[_]u8{},
         .chr = &chr,
         .chr_is_ram = false,
+        .mirroring_mode = .horizontal,
+    } };
+    var ppu = Ppu{
+        .mapper = &nrom,
     };
 
     ppu.writeRegister(0x2006, 0x00);
@@ -446,6 +470,30 @@ test "palette background entries mirror to universal background color" {
     ppu.writeRegister(0x2006, 0x3f);
     ppu.writeRegister(0x2006, 0x00);
     try std.testing.expectEqual(@as(u8, 0x22), ppu.readRegister(0x2007));
+}
+
+test "PPU reports frame completion when scanline wraps" {
+    var ppu = Ppu{
+        .scanline = 260,
+        .cycles = 340,
+    };
+
+    try std.testing.expect(!ppu.tick());
+    try std.testing.expectEqual(@as(i16, -1), ppu.scanline);
+    try std.testing.expectEqual(@as(u32, 0), ppu.cycles);
+    try std.testing.expect(ppu.takeFrameComplete());
+    try std.testing.expect(!ppu.takeFrameComplete());
+}
+
+test "PPU NMI and frame completion are separate signals" {
+    var ppu = Ppu{
+        .ctrl = 0x80,
+        .scanline = 241,
+        .cycles = 1,
+    };
+
+    try std.testing.expect(ppu.tick());
+    try std.testing.expect(!ppu.takeFrameComplete());
 }
 
 test "sprite overflow flag is set when more than eight sprites cover a scanline" {
