@@ -1,0 +1,13 @@
+.{
+    .name = ._6soz_nes,
+    .version = "0.0.1",
+    .dependencies = .{
+        .core = .{
+            .url = "git+https://github.com/burakssen/6soz-core#d9fa615cf743646b636c689660f977904011f2b4",
+            .hash = "_6soz_core-0.0.1-hf4HBtl7AAANZheVl-riwLyt6ciW_78B5w6ED27-JTyy",
+        },
+    },
+    .minimum_zig_version = "0.16.0",
+    .paths = .{""},
+    .fingerprint = 0x9fa1091ed4fb5eda,
+}
