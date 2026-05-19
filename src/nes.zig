@@ -1,11 +1,11 @@
 const std = @import("std");
 const core = @import("core");
 
-const Ppu = @import("ppu");
-const Apu = @import("apu");
+pub const Ppu = @import("ppu");
+pub const Apu = @import("apu");
 
-const Bus = @import("bus.zig");
-const Cartridge = @import("cartridge.zig");
+pub const Bus = @import("bus.zig");
+pub const Cartridge = @import("cartridge.zig");
 
 const Nes = @This();
 
