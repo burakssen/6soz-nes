@@ -11,6 +11,7 @@ Supported cartridge features:
 - iNES and NES 2.0 header parsing
 - Mapper 0 / NROM support
 - Mapper 1 / MMC1 support
+- Mapper 3 / CNROM support
 - Initial mapper 4 / MMC3 support
 - CHR ROM and CHR RAM
 - Horizontal, vertical, and single-screen nametable mirroring

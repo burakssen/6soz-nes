@@ -34,7 +34,7 @@ const Header = struct {
 
 fn parseInes(data: *const [16]u8) Header {
     const flags6 = data[6];
-    const flags7 = data[7];
+    const flags7: u8 = if (std.mem.eql(u8, data[7..16], "DiskDude!")) 0 else data[7];
 
     const prg_size = @as(usize, data[4]) * prg_bank_size;
     const chr_rom_size = @as(usize, data[5]) * chr_bank_size;
@@ -211,6 +211,12 @@ pub fn load(allocator: std.mem.Allocator, data: []const u8) !Cartridge {
             .chr_is_ram = header.chr_rom_size == 0,
             .prg_ram = prg_ram,
         } },
+        3 => Mapper{ .cnrom = .{
+            .prg_rom = prg_rom,
+            .chr = chr,
+            .chr_is_ram = header.chr_rom_size == 0,
+            .mirroring_mode = header.mirroring,
+        } },
         4 => Mapper{ .mmc3 = .{
             .prg_rom = prg_rom,
             .chr = chr,
@@ -293,6 +299,57 @@ test "allocates CHR RAM when iNES file has no CHR ROM" {
     try std.testing.expectEqual(@as(usize, chr_bank_size), cartridge.chr.len);
     try std.testing.expect(cartridge.mapper.nrom.chr_is_ram);
     try std.testing.expectEqual(@as(u8, 0), cartridge.chr[0]);
+}
+
+test "loads iNES ROM with DiskDude header junk as mapper 0" {
+    const allocator = std.testing.allocator;
+    const prg_size = 16 * 1024;
+    const chr_size = 8 * 1024;
+
+    var data = try allocator.alloc(u8, 16 + prg_size + chr_size);
+    defer allocator.free(data);
+    @memset(data, 0);
+    @memcpy(data[0..4], "NES\x1a");
+    data[4] = 1;
+    data[5] = 1;
+    @memcpy(data[7..16], "DiskDude!");
+
+    var cartridge = try Cartridge.load(allocator, data);
+    defer cartridge.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u16, 0), cartridge.mapper_id);
+    try std.testing.expectEqual(@as(usize, prg_size), cartridge.prg_rom.len);
+    try std.testing.expectEqual(@as(usize, chr_size), cartridge.chr.len);
+}
+
+test "loads mapper 3 CNROM ROM" {
+    const allocator = std.testing.allocator;
+    const prg_size = 32 * 1024;
+    const chr_size = 16 * 1024;
+
+    var data = try allocator.alloc(u8, 16 + prg_size + chr_size);
+    defer allocator.free(data);
+    @memset(data, 0);
+    @memcpy(data[0..4], "NES\x1a");
+    data[4] = 2;
+    data[5] = 2;
+    data[6] = 0x31;
+    data[16] = 0xea;
+    data[16 + prg_size] = 0x42;
+    data[16 + prg_size + chr_bank_size] = 0x84;
+
+    var cartridge = try Cartridge.load(allocator, data);
+    defer cartridge.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u16, 3), cartridge.mapper_id);
+    try std.testing.expectEqual(@as(usize, prg_size), cartridge.prg_rom.len);
+    try std.testing.expectEqual(@as(usize, chr_size), cartridge.chr.len);
+    try std.testing.expectEqual(Cartridge.Mirroring.vertical, cartridge.mapper.mirroring());
+    try std.testing.expectEqual(@as(u8, 0xea), cartridge.mapper.prgRead(0x8000));
+    try std.testing.expectEqual(@as(u8, 0x42), cartridge.mapper.chrRead(0x0000));
+
+    cartridge.mapper.prgWrite(0x8000, 1);
+    try std.testing.expectEqual(@as(u8, 0x84), cartridge.mapper.chrRead(0x0000));
 }
 
 test "rejects unsupported mapper" {

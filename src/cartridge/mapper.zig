@@ -2,11 +2,13 @@ const common = @import("common.zig");
 
 const Nrom = @import("nrom.zig");
 const Mmc1 = @import("mmc1.zig");
+const Cnrom = @import("cnrom.zig");
 const Mmc3 = @import("mmc3.zig");
 
 pub const Mapper = union(enum) {
     nrom: Nrom,
     mmc1: Mmc1,
+    cnrom: Cnrom,
     mmc3: Mmc3,
 
     pub fn prgRead(self: *Mapper, addr: u16) u8 {
