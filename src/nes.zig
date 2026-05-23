@@ -10,6 +10,7 @@ pub const Cartridge = @import("cartridge");
 const Nes = @This();
 
 const max_frame_audio_samples = 4096;
+const max_step_audio_samples = 256;
 
 cpu: core.Cpu = .{},
 bus: Bus,
@@ -20,6 +21,8 @@ cart: ?Cartridge = null,
 allocator: std.mem.Allocator,
 frame_audio: [max_frame_audio_samples]f32 = [_]f32{0} ** max_frame_audio_samples,
 frame_audio_count: usize = 0,
+step_audio: [max_step_audio_samples]f32 = [_]f32{0} ** max_step_audio_samples,
+step_audio_count: usize = 0,
 
 pub fn init(allocator: std.mem.Allocator) Nes {
     return .{
@@ -30,6 +33,8 @@ pub fn init(allocator: std.mem.Allocator) Nes {
         .allocator = allocator,
         .frame_audio = [_]f32{0} ** max_frame_audio_samples,
         .frame_audio_count = 0,
+        .step_audio = [_]f32{0} ** max_step_audio_samples,
+        .step_audio_count = 0,
     };
 }
 
@@ -62,30 +67,32 @@ pub fn load(self: *Nes, data: []const u8) !void {
 pub fn step(self: *Nes) !Ppu.StepResult {
     self.connectDevices();
     self.latchInput();
+    self.step_audio_count = 0;
     var cpu_bus = core.Bus.init(&self.bus);
     self.bus.setCpuCycleParity(self.cpu.cycles);
     const cpu_cycles = try self.cpu.step(&cpu_bus);
     const dma_cycles = self.bus.takeDmaStallCycles();
-    var total_cpu_cycles = @as(u32, cpu_cycles) + dma_cycles;
+    var total_cpu_cycles = @as(u32, cpu_cycles);
+    total_cpu_cycles += dma_cycles;
     self.cpu.cycles += dma_cycles;
 
-    var i: u32 = 0;
-    while (i < total_cpu_cycles * 3) : (i += 1) {
-        if (self.ppu.tick()) {
-            total_cpu_cycles += self.cpu.nmi(&cpu_bus);
+    total_cpu_cycles += self.advanceDevices(@as(u32, cpu_cycles), &cpu_bus);
+    if (dma_cycles > 0) total_cpu_cycles += self.advanceDevices(dma_cycles, &cpu_bus);
+
+    const mapper_irq = if (self.cart) |*c| c.mapper.irqActive() else false;
+    if (self.apu.pollIrq() or mapper_irq) {
+        const irq_cycles = self.cpu.irq(&cpu_bus);
+        if (irq_cycles > 0) {
+            total_cpu_cycles += irq_cycles;
+            if (mapper_irq) self.cart.?.mapper.acknowledgeIrq();
+            total_cpu_cycles += self.advanceDevices(irq_cycles, &cpu_bus);
         }
     }
     const frame_complete = self.ppu.takeFrameComplete();
 
-    const audio = self.apu.tick(total_cpu_cycles);
-    const mapper_irq = if (self.cart) |*c| c.mapper.irqActive() else false;
-    if (self.apu.pollIrq() or mapper_irq) {
-        total_cpu_cycles += self.cpu.irq(&cpu_bus);
-    }
-
     return .{
         .cycles = total_cpu_cycles,
-        .audio = audio,
+        .audio = self.step_audio[0..self.step_audio_count],
         .frame_complete = frame_complete,
     };
 }
@@ -138,6 +145,41 @@ fn appendFrameAudio(self: *Nes, audio: []const f32) void {
     self.frame_audio_count += count;
 }
 
+fn appendStepAudio(self: *Nes, audio: []const f32) void {
+    const available = self.step_audio.len - self.step_audio_count;
+    const count = @min(available, audio.len);
+    @memcpy(self.step_audio[self.step_audio_count..][0..count], audio[0..count]);
+    self.step_audio_count += count;
+}
+
+fn advanceDevices(self: *Nes, cycles: u32, cpu_bus: *core.Bus) u32 {
+    var extra_cycles: u32 = 0;
+    var pending = cycles;
+
+    while (pending > 0) {
+        var i: u32 = 0;
+        while (i < pending * 3) : (i += 1) {
+            if (self.ppu.tick()) {
+                const nmi_cycles = self.cpu.nmi(cpu_bus);
+                extra_cycles += nmi_cycles;
+                pending += nmi_cycles;
+            }
+        }
+
+        const reader = Apu.MemoryReader.init(&self.bus);
+        const apu_result = self.apu.tickWithMemory(pending, reader);
+        self.appendStepAudio(apu_result.audio);
+
+        pending = apu_result.dmc_stall_cycles;
+        if (pending > 0) {
+            self.cpu.cycles += pending;
+            extra_cycles += pending;
+        }
+    }
+
+    return extra_cycles;
+}
+
 fn connectDevices(self: *Nes) void {
     self.bus.ppu = &self.ppu;
     self.bus.apu = &self.apu;
@@ -174,7 +216,7 @@ fn makeMapper1TestRom(allocator: std.mem.Allocator) ![]u8 {
     @memcpy(data[0..4], "NES\x1a");
     data[4] = 8;
     data[5] = 0;
-    data[6] = 0x10;
+    data[6] = 0x12;
     data[16 + 0x3ffc] = 0x00;
     data[16 + 0x3ffd] = 0x80;
     return data;

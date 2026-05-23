@@ -3,6 +3,7 @@ const std = @import("std");
 const Pulse = @import("pulse.zig");
 const Triangle = @import("triangle.zig");
 const Noise = @import("noise.zig");
+const Dmc = @import("dmc.zig");
 const DcBlocker = @import("dc_blocker.zig");
 const OnePoleLowPass = @import("one_pole_low_pass.zig");
 
@@ -10,12 +11,18 @@ const Apu = @This();
 
 pub const sample_rate = 48_000;
 pub const cpu_rate = 1_789_773;
+pub const MemoryReader = Dmc.MemoryReader;
+pub const StepResult = struct {
+    audio: []const f32,
+    dmc_stall_cycles: u32 = 0,
+};
 const max_samples = 2048;
 const frame_period = 7457;
 
 pulse: [2]Pulse = .{ .{ .channel = 0 }, .{ .channel = 1 } },
 triangle: Triangle = .{},
 noise: Noise = .{},
+dmc: Dmc = .{},
 status: u8 = 0,
 sample_accum: u32 = 0,
 frame_cycle_accum: u32 = 0,
@@ -35,7 +42,7 @@ pub fn writeRegister(self: *Apu, addr: u16, value: u8) void {
         0x4004...0x4007 => self.pulse[1].write(addr & 0x0003, value),
         0x4008...0x400b => self.triangle.write(addr & 0x0003, value),
         0x400c...0x400f => self.noise.write(addr & 0x0003, value),
-        0x4010...0x4013 => {},
+        0x4010...0x4013 => self.dmc.write(addr & 0x0003, value),
         0x4015 => self.writeStatus(value),
         0x4017 => {
             self.frame_mode_5_step = (value & 0x80) != 0;
@@ -57,17 +64,24 @@ pub fn readStatus(self: *Apu) u8 {
         (if (self.pulse[1].length_counter != 0) @as(u8, 0x02) else 0) |
         (if (self.triangle.length_counter != 0) @as(u8, 0x04) else 0) |
         (if (self.noise.length_counter != 0) @as(u8, 0x08) else 0) |
+        (if (self.dmc.bytes_remaining != 0) @as(u8, 0x10) else 0) |
+        (if (self.dmc.irq_pending) @as(u8, 0x80) else 0) |
         (if (self.frame_irq_pending) @as(u8, 0x40) else 0);
     self.frame_irq_pending = false;
     return status;
 }
 
 pub fn tick(self: *Apu, cpu_cycles: u32) []const f32 {
+    return self.tickWithMemory(cpu_cycles, null).audio;
+}
+
+pub fn tickWithMemory(self: *Apu, cpu_cycles: u32, reader: ?MemoryReader) StepResult {
     self.sample_count = 0;
+    var dmc_stall_cycles: u32 = 0;
 
     var i: u32 = 0;
     while (i < cpu_cycles) : (i += 1) {
-        self.clockCpuCycle();
+        dmc_stall_cycles += self.clockCpuCycle(reader);
         self.sample_accum += sample_rate;
         if (self.sample_accum >= cpu_rate and self.sample_count < self.samples.len) {
             self.sample_accum -= cpu_rate;
@@ -76,11 +90,14 @@ pub fn tick(self: *Apu, cpu_cycles: u32) []const f32 {
         }
     }
 
-    return self.samples[0..self.sample_count];
+    return .{
+        .audio = self.samples[0..self.sample_count],
+        .dmc_stall_cycles = dmc_stall_cycles,
+    };
 }
 
 pub fn pollIrq(self: *const Apu) bool {
-    return self.frame_irq_pending;
+    return self.frame_irq_pending or self.dmc.irq_pending;
 }
 
 fn writeStatus(self: *Apu, value: u8) void {
@@ -89,6 +106,7 @@ fn writeStatus(self: *Apu, value: u8) void {
     self.pulse[1].enabled = (self.status & 0x02) != 0;
     self.triangle.enabled = (self.status & 0x04) != 0;
     self.noise.enabled = (self.status & 0x08) != 0;
+    self.dmc.setEnabled((self.status & 0x10) != 0);
 
     if (!self.pulse[0].enabled) self.pulse[0].length_counter = 0;
     if (!self.pulse[1].enabled) self.pulse[1].length_counter = 0;
@@ -96,8 +114,9 @@ fn writeStatus(self: *Apu, value: u8) void {
     if (!self.noise.enabled) self.noise.length_counter = 0;
 }
 
-fn clockCpuCycle(self: *Apu) void {
+fn clockCpuCycle(self: *Apu, reader: ?MemoryReader) u32 {
     self.triangle.clockTimer();
+    const dmc_stalls = self.dmc.tick(reader);
 
     self.pulse_noise_clock = !self.pulse_noise_clock;
     if (self.pulse_noise_clock) {
@@ -111,6 +130,7 @@ fn clockCpuCycle(self: *Apu) void {
         self.frame_cycle_accum -= frame_period;
         self.clockFrameSequencer();
     }
+    return dmc_stalls;
 }
 
 fn clockFrameSequencer(self: *Apu) void {
@@ -149,15 +169,17 @@ fn outputSample(self: *Apu) f32 {
         self.pulse[1].output(),
         self.triangle.output(),
         self.noise.output(),
+        self.dmc.output(),
     );
     const without_dc = self.high_pass.process(mixed);
     return std.math.clamp(self.low_pass.process(without_dc) * 1.6, -1.0, 1.0);
 }
 
-fn mixNes(pulse1: u4, pulse2: u4, triangle: u4, noise: u4) f32 {
+fn mixNes(pulse1: u4, pulse2: u4, triangle: u4, noise: u4, dmc: u7) f32 {
     const pulse_sum = @as(f32, @floatFromInt(pulse1)) + @as(f32, @floatFromInt(pulse2));
     const tnd_sum = @as(f32, @floatFromInt(triangle)) / 8227.0 +
-        @as(f32, @floatFromInt(noise)) / 12241.0;
+        @as(f32, @floatFromInt(noise)) / 12241.0 +
+        @as(f32, @floatFromInt(dmc)) / 22638.0;
 
     const pulse_out: f32 = if (pulse_sum == 0) 0 else 95.88 / ((8128.0 / pulse_sum) + 100.0);
     const tnd_out: f32 = if (tnd_sum == 0) 0 else 159.79 / ((1.0 / tnd_sum) + 100.0);
@@ -180,4 +202,44 @@ test "frame IRQ inhibit clears and suppresses frame IRQ" {
 
     try std.testing.expect(!apu.pollIrq());
     try std.testing.expectEqual(@as(u8, 0), apu.readStatus() & 0x40);
+}
+
+const TestMemory = struct {
+    data: [65536]u8 = [_]u8{0} ** 65536,
+
+    pub fn read(self: *const @This(), addr: u16) u8 {
+        return self.data[addr];
+    }
+};
+
+test "DMC fetches sample bytes, reports stalls, and contributes status" {
+    var mem = TestMemory{};
+    mem.data[0xc000] = 0xaa;
+
+    var apu = Apu{};
+    apu.writeRegister(0x4012, 0);
+    apu.writeRegister(0x4013, 1);
+    apu.writeRegister(0x4015, 0x10);
+
+    const result = apu.tickWithMemory(1, MemoryReader.init(&mem));
+
+    try std.testing.expectEqual(@as(u32, 4), result.dmc_stall_cycles);
+    try std.testing.expectEqual(@as(u8, 0x10), apu.readStatus() & 0x10);
+}
+
+test "DMC raises IRQ at sample end when enabled" {
+    var mem = TestMemory{};
+    var apu = Apu{};
+    apu.writeRegister(0x4010, 0x80);
+    apu.writeRegister(0x4012, 0);
+    apu.writeRegister(0x4013, 0);
+    apu.writeRegister(0x4015, 0x10);
+
+    _ = apu.tickWithMemory(1, MemoryReader.init(&mem));
+
+    try std.testing.expect(apu.pollIrq());
+    try std.testing.expectEqual(@as(u8, 0x80), apu.readStatus() & 0x80);
+
+    apu.writeRegister(0x4015, 0);
+    try std.testing.expect(!apu.pollIrq());
 }

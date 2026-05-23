@@ -64,7 +64,8 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run 6soz-nes tests");
     inline for (&.{ nes_mod, bus_mod, cartridge_mod, ppu_mod, ppu_input_mod, apu_mod }) |test_mod| {
         const test_cmd = b.addTest(.{ .root_module = test_mod });
-        test_step.dependOn(&test_cmd.step);
+        const run_test = b.addRunArtifact(test_cmd);
+        test_step.dependOn(&run_test.step);
     }
 
     const nes_lib = b.addLibrary(.{

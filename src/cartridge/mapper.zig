@@ -35,6 +35,13 @@ pub const Mapper = union(enum) {
         }
     }
 
+    pub fn ppuA12(self: *Mapper, addr: u16) void {
+        switch (self.*) {
+            .mmc3 => |*m| m.ppuA12(addr),
+            else => {},
+        }
+    }
+
     pub fn irqActive(self: *const Mapper) bool {
         return switch (self.*) {
             .mmc3 => |*m| m.irq_active,

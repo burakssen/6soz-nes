@@ -3,8 +3,8 @@
     .version = "0.0.1",
     .dependencies = .{
         .core = .{
-            .url = "git+https://github.com/burakssen/6soz-core#af230c80ee9e1e7c89ca2f58159c6162d988ffe8",
-            .hash = "_6soz_core-0.0.1-hf4HBj19AAAXO_2lDMri39QRhdO1i2P1SuQP6JN-E1uJ",
+            .url = "git+https://github.com/burakssen/6soz-core#17711fa6fef4220572a463d8c4e4e87a75012118",
+            .hash = "_6soz_core-0.0.1-hf4HBleHAACZXdquuMAFtMeTiwTdICEaC2254QMEzNe8",
         },
     },
     .minimum_zig_version = "0.16.0",

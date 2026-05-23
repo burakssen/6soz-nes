@@ -17,6 +17,9 @@ mapper: Mapper,
 mapper_id: u16,
 submapper_id: u8,
 timing_mode: common.TimingMode,
+has_battery: bool,
+save_ram_start: usize,
+save_ram_len: usize,
 
 const Header = struct {
     prg_size: usize,
@@ -30,6 +33,7 @@ const Header = struct {
     chr_nvram_size: usize = 0,
     timing_mode: common.TimingMode = .ntsc,
     has_trainer: bool,
+    has_battery: bool = false,
 };
 
 fn parseInes(data: *const [16]u8) Header {
@@ -54,6 +58,7 @@ fn parseInes(data: *const [16]u8) Header {
         .mapper_id = mapper_id,
         .mirroring = mirroring,
         .has_trainer = (flags6 & 0x04) != 0,
+        .has_battery = (flags6 & 0x02) != 0,
     };
 }
 
@@ -131,7 +136,12 @@ fn parseNes2(data: *const [16]u8) Header {
         .chr_nvram_size = chr_nvram_size,
         .timing_mode = timing_mode,
         .has_trainer = (flags6 & 0x04) != 0,
+        .has_battery = headerHasBattery(data),
     };
+}
+
+fn headerHasBattery(data: *const [16]u8) bool {
+    return (data[6] & 0x02) != 0 or ((data[10] >> 4) & 0x0f) != 0;
 }
 
 pub fn load(allocator: std.mem.Allocator, data: []const u8) !Cartridge {
@@ -186,7 +196,7 @@ pub fn load(allocator: std.mem.Allocator, data: []const u8) !Cartridge {
 
     const prg_ram_size = if (header.prg_ram_size > 0 or header.prg_nvram_size > 0)
         header.prg_ram_size + header.prg_nvram_size
-    else if (header.mapper_id == 1 or header.mapper_id == 4)
+    else if (header.mapper_id == 1 or header.mapper_id == 4 or header.has_battery)
         @as(usize, 8192)
     else
         0;
@@ -197,6 +207,14 @@ pub fn load(allocator: std.mem.Allocator, data: []const u8) !Cartridge {
         @memset(prg_ram, 0);
     }
     errdefer if (prg_ram.len > 0) allocator.free(prg_ram);
+
+    const save_ram_start: usize = if (header.prg_nvram_size > 0) header.prg_ram_size else 0;
+    const save_ram_len: usize = if (header.prg_nvram_size > 0)
+        header.prg_nvram_size
+    else if (header.has_battery)
+        prg_ram.len
+    else
+        0;
 
     const mapper: Mapper = switch (header.mapper_id) {
         0 => Mapper{ .nrom = .{
@@ -235,6 +253,9 @@ pub fn load(allocator: std.mem.Allocator, data: []const u8) !Cartridge {
         .mapper_id = header.mapper_id,
         .submapper_id = header.submapper_id,
         .timing_mode = header.timing_mode,
+        .has_battery = save_ram_len > 0,
+        .save_ram_start = save_ram_start,
+        .save_ram_len = save_ram_len,
     };
 }
 
@@ -245,14 +266,16 @@ pub fn deinit(self: *Cartridge, allocator: std.mem.Allocator) void {
 }
 
 pub fn saveRam(self: *const Cartridge) ?[]const u8 {
-    if (self.prg_ram.len == 0) return null;
-    return self.prg_ram;
+    if (!self.has_battery) return null;
+    if (self.save_ram_len == 0) return null;
+    return self.prg_ram[self.save_ram_start..][0..self.save_ram_len];
 }
 
 pub fn loadSaveRam(self: *Cartridge, data: []const u8) !void {
-    if (self.prg_ram.len == 0) return error.NoSaveRam;
-    if (data.len != self.prg_ram.len) return error.InvalidSaveRamSize;
-    @memcpy(self.prg_ram, data);
+    if (!self.has_battery) return error.NoSaveRam;
+    if (self.save_ram_len == 0) return error.NoSaveRam;
+    if (data.len != self.save_ram_len) return error.InvalidSaveRamSize;
+    @memcpy(self.prg_ram[self.save_ram_start..][0..self.save_ram_len], data);
 }
 
 test "loads iNES header and copies PRG and CHR ROM" {
@@ -363,7 +386,7 @@ test "rejects unsupported mapper" {
     @memcpy(data[0..4], "NES\x1a");
     data[4] = 1;
     data[5] = 1;
-    data[6] = 0x10;
+    data[6] = 0x20;
 
     try std.testing.expectError(error.UnsupportedMapper, Cartridge.load(allocator, data));
 }
@@ -378,7 +401,7 @@ test "loads mapper 1 MMC1 ROM with default PRG RAM and CHR RAM" {
     @memcpy(data[0..4], "NES\x1a");
     data[4] = 8;
     data[5] = 0;
-    data[6] = 0x10;
+    data[6] = 0x12;
     data[16] = 0xea;
 
     var cartridge = try Cartridge.load(allocator, data);
@@ -402,7 +425,7 @@ test "mapper 1 exposes and imports save RAM" {
     @memcpy(data[0..4], "NES\x1a");
     data[4] = 8;
     data[5] = 0;
-    data[6] = 0x10;
+    data[6] = 0x12;
 
     var cartridge = try Cartridge.load(allocator, data);
     defer cartridge.deinit(allocator);
@@ -421,7 +444,7 @@ test "mapper 1 exposes and imports save RAM" {
     try std.testing.expectEqual(@as(u8, 0x34), cartridge.mapper.prgRead(0x7fff));
 }
 
-test "save RAM import rejects size mismatch" {
+test "volatile mapper 1 PRG RAM is not exported as save RAM" {
     const allocator = std.testing.allocator;
     const prg_size = 128 * 1024;
 
@@ -432,6 +455,45 @@ test "save RAM import rejects size mismatch" {
     data[4] = 8;
     data[5] = 0;
     data[6] = 0x10;
+
+    var cartridge = try Cartridge.load(allocator, data);
+    defer cartridge.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 8192), cartridge.prg_ram.len);
+    try std.testing.expectEqual(@as(?[]const u8, null), cartridge.saveRam());
+    try std.testing.expectError(error.NoSaveRam, cartridge.loadSaveRam(&[_]u8{}));
+}
+
+test "battery NROM exposes save RAM" {
+    const allocator = std.testing.allocator;
+    const prg_size = 16 * 1024;
+    const chr_size = 8 * 1024;
+
+    var data = try allocator.alloc(u8, 16 + prg_size + chr_size);
+    defer allocator.free(data);
+    @memset(data, 0);
+    @memcpy(data[0..4], "NES\x1a");
+    data[4] = 1;
+    data[5] = 1;
+    data[6] = 0x02;
+
+    var cartridge = try Cartridge.load(allocator, data);
+    defer cartridge.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 8192), cartridge.saveRam().?.len);
+}
+
+test "save RAM import rejects size mismatch" {
+    const allocator = std.testing.allocator;
+    const prg_size = 128 * 1024;
+
+    var data = try allocator.alloc(u8, 16 + prg_size);
+    defer allocator.free(data);
+    @memset(data, 0);
+    @memcpy(data[0..4], "NES\x1a");
+    data[4] = 8;
+    data[5] = 0;
+    data[6] = 0x12;
 
     var cartridge = try Cartridge.load(allocator, data);
     defer cartridge.deinit(allocator);
@@ -562,5 +624,6 @@ test "loads NES 2.0 with exponent sizes, submapper, RAM and timing" {
     try std.testing.expectEqual(@as(u16, 0), cartridge.mapper_id);
     try std.testing.expectEqual(@as(u8, 1), cartridge.submapper_id);
     try std.testing.expectEqual(@as(usize, 256), cartridge.prg_ram.len); // 128 + 128
+    try std.testing.expectEqual(@as(usize, 128), cartridge.saveRam().?.len);
     try std.testing.expectEqual(common.TimingMode.pal, cartridge.timing_mode);
 }

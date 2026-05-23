@@ -79,17 +79,19 @@ pub fn prgWrite(self: *Mmc3, addr: u16, val: u8) void {
 }
 
 pub fn chrRead(self: *Mmc3, addr: u16) u8 {
-    self.updateIrq(addr);
     if (self.chr.len == 0) return 0;
     const bank_addr = self.getChrAddr(addr);
     return self.chr[bank_addr % self.chr.len];
 }
 
 pub fn chrWrite(self: *Mmc3, addr: u16, val: u8) void {
-    self.updateIrq(addr);
     if (!self.chr_is_ram or self.chr.len == 0) return;
     const bank_addr = self.getChrAddr(addr);
     self.chr[bank_addr % self.chr.len] = val;
+}
+
+pub fn ppuA12(self: *Mmc3, addr: u16) void {
+    self.updateIrq(addr);
 }
 
 pub fn mirroring(self: *const Mmc3) common.Mirroring {
@@ -265,11 +267,11 @@ test "MMC3 raises and clears IRQ on A12 edges" {
     mapper.prgWrite(0xc000, 1);
     mapper.prgWrite(0xe001, 0);
 
-    _ = mapper.chrRead(0x1000);
+    mapper.ppuA12(0x1000);
     try std.testing.expect(!mapper.irq_active);
 
-    _ = mapper.chrRead(0x0000);
-    _ = mapper.chrRead(0x1000);
+    mapper.ppuA12(0x0000);
+    mapper.ppuA12(0x1000);
     try std.testing.expect(mapper.irq_active);
 
     mapper.prgWrite(0xe000, 0);

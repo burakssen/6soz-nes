@@ -56,6 +56,9 @@ bg_shifter_attrib_hi: u16 = 0,
 
 framebuffer: Video.Framebuffer = [_]u32{0} ** (Video.width * Video.height),
 
+scanline_sprites: [8]usize = [_]usize{0} ** 8,
+scanline_sprite_count: u4 = 0,
+
 pub fn readRegister(self: *Ppu, addr: u16) u8 {
     return switch (registerAddr(addr)) {
         0x2002 => {
@@ -68,7 +71,10 @@ pub fn readRegister(self: *Ppu, addr: u16) u8 {
         0x2007 => {
             var res = self.data_buffer;
             self.data_buffer = self.vramRead(self.v);
-            if (self.v >= 0x3F00) res = self.data_buffer;
+            if ((self.v & 0x3FFF) >= 0x3F00) {
+                res = self.data_buffer;
+                self.data_buffer = self.vramRead(0x2000 | (self.v & 0x0FFF));
+            }
             self.v +%= if ((self.ctrl & 0x04) != 0) @as(u16, 32) else @as(u16, 1);
             return res;
         },
@@ -79,8 +85,12 @@ pub fn readRegister(self: *Ppu, addr: u16) u8 {
 pub fn writeRegister(self: *Ppu, addr: u16, val: u8) void {
     switch (registerAddr(addr)) {
         0x2000 => {
+            const was_nmi_enabled = (self.ctrl & 0x80) != 0;
             self.ctrl = val;
             self.t = (self.t & 0xF3FF) | (@as(u16, val & 0x03) << 10);
+            if (!was_nmi_enabled and (val & 0x80) != 0 and (self.status & 0x80) != 0) {
+                self.nmi_occurred = true;
+            }
         },
         0x2001 => {
             self.mask = val;
@@ -143,6 +153,11 @@ fn vramRead(self: *Ppu, addr: u16) u8 {
     return 0;
 }
 
+fn fetchPattern(self: *Ppu, addr: u16) u8 {
+    if (self.mapper) |m| m.ppuA12(addr & 0x3FFF);
+    return self.vramRead(addr);
+}
+
 fn vramWrite(self: *Ppu, addr: u16, val: u8) void {
     const a = addr & 0x3FFF;
     if (a < 0x2000) {
@@ -190,11 +205,11 @@ pub fn tick(self: *Ppu) bool {
                 },
                 4 => {
                     const bank: u16 = if ((self.ctrl & 0x10) != 0) 0x1000 else 0;
-                    self.bg_next_low_tile = self.vramRead(bank + (@as(u16, self.bg_next_nametable) << 4) + ((self.v >> 12) & 0x07));
+                    self.bg_next_low_tile = self.fetchPattern(bank + (@as(u16, self.bg_next_nametable) << 4) + ((self.v >> 12) & 0x07));
                 },
                 6 => {
                     const bank: u16 = if ((self.ctrl & 0x10) != 0) 0x1000 else 0;
-                    self.bg_next_high_tile = self.vramRead(bank + (@as(u16, self.bg_next_nametable) << 4) + ((self.v >> 12) & 0x07) + 8);
+                    self.bg_next_high_tile = self.fetchPattern(bank + (@as(u16, self.bg_next_nametable) << 4) + ((self.v >> 12) & 0x07) + 8);
                 },
                 7 => {
                     self.incrementScrollX();
@@ -341,8 +356,9 @@ fn spritePixel(self: *Ppu, x_pos: u16, y_pos: u16) SpritePixel {
     if (x_pos < 8 and (self.mask & 0x04) == 0) return .{};
 
     const sprite_height: i16 = if ((self.ctrl & 0x20) != 0) 16 else 8;
-    var i: usize = 0;
-    while (i < 64) : (i += 1) {
+    var slot: usize = 0;
+    while (slot < self.scanline_sprite_count) : (slot += 1) {
+        const i = self.scanline_sprites[slot];
         const base = i * 4;
         const sprite_y = @as(i16, self.oam[base]) + 1;
         const row = @as(i16, @intCast(y_pos)) - sprite_y;
@@ -390,15 +406,19 @@ fn spritePatternAddress(self: *const Ppu, tile: u8, row: u8) u16 {
 fn evaluateSpriteOverflow(self: *Ppu, y_pos: u16) void {
     const sprite_height: i16 = if ((self.ctrl & 0x20) != 0) 16 else 8;
     var visible: u8 = 0;
+    self.scanline_sprite_count = 0;
 
     for (0..64) |i| {
         const sprite_y = @as(i16, self.oam[i * 4]) + 1;
         const row = @as(i16, @intCast(y_pos)) - sprite_y;
         if (row >= 0 and row < sprite_height) {
             visible += 1;
+            if (self.scanline_sprite_count < self.scanline_sprites.len) {
+                self.scanline_sprites[@as(usize, self.scanline_sprite_count)] = i;
+                self.scanline_sprite_count += 1;
+            }
             if (visible > 8) {
                 self.status |= 0x20;
-                return;
             }
         }
     }
@@ -496,6 +516,28 @@ test "PPU NMI and frame completion are separate signals" {
     try std.testing.expect(!ppu.takeFrameComplete());
 }
 
+test "PPU enables NMI during active vblank" {
+    var ppu = Ppu{ .status = 0x80 };
+
+    ppu.writeRegister(0x2000, 0x80);
+
+    try std.testing.expect(ppu.tick());
+}
+
+test "palette reads fill buffer from mirrored nametable" {
+    var ppu = Ppu{};
+    ppu.vram[0x700] = 0x55;
+    ppu.palette[0] = 0x22;
+
+    ppu.writeRegister(0x2006, 0x3f);
+    ppu.writeRegister(0x2006, 0x00);
+    try std.testing.expectEqual(@as(u8, 0x22), ppu.readRegister(0x2007));
+
+    ppu.writeRegister(0x2006, 0x20);
+    ppu.writeRegister(0x2006, 0x01);
+    try std.testing.expectEqual(@as(u8, 0x55), ppu.readRegister(0x2007));
+}
+
 test "sprite overflow flag is set when more than eight sprites cover a scanline" {
     var ppu = Ppu{};
 
@@ -507,6 +549,33 @@ test "sprite overflow flag is set when more than eight sprites cover a scanline"
     ppu.evaluateSpriteOverflow(10);
 
     try std.testing.expect((ppu.status & 0x20) != 0);
+}
+
+test "sprite renderer only considers first eight visible sprites" {
+    var chr: [8 * 1024]u8 = [_]u8{0} ** (8 * 1024);
+    chr[0x10] = 0x80;
+    var nrom = Cartridge.Mapper{ .nrom = .{
+        .prg_rom = &[_]u8{},
+        .chr = &chr,
+        .chr_is_ram = false,
+        .mirroring_mode = .horizontal,
+    } };
+    var ppu = Ppu{
+        .mapper = &nrom,
+        .mask = 0x10,
+    };
+    ppu.palette[0x11] = 0x01;
+
+    for (0..9) |i| {
+        ppu.oam[i * 4] = 9;
+        ppu.oam[i * 4 + 1] = if (i == 8) 1 else 0;
+        ppu.oam[i * 4 + 3] = 0;
+    }
+
+    ppu.evaluateSpriteOverflow(10);
+
+    try std.testing.expectEqual(@as(u4, 8), ppu.scanline_sprite_count);
+    try std.testing.expectEqual(palette_table[0], ppu.renderPixel(0, 10));
 }
 
 test "8x16 sprite pattern address uses tile bit zero as pattern table select" {
