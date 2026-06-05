@@ -1,39 +1,55 @@
 # 6soz-nes
 
-A minimal NES emulator core written in Zig.
+A decoupled NES emulator core written in Zig.
 
-## Status
+## Features
 
-Early work-in-progress. The project currently provides a Zig library module for loading and stepping NES state, with CPU integration through [`6soz-core`](https://github.com/burakssen/6soz-core), PPU/APU modules, controller input, framebuffer access, and cartridge-backed framebuffer/audio stepping.
+The project provides a Zig library module for loading and stepping NES state, with CPU integration through [`6soz-mos6502`](https://github.com/burakssen/6soz-mos6502), PPU/APU modules, controller input, framebuffer access, and cartridge-backed framebuffer/audio stepping.
 
-Supported cartridge features:
+### Supported Mappers
 
+- Mapper 0 (NROM)
+- Mapper 1 (MMC1)
+- Mapper 3 (CNROM)
+- Mapper 4 (MMC3) - Initial support
+
+### Other Features
 - iNES and NES 2.0 header parsing
-- Mapper 0 / NROM support
-- Mapper 1 / MMC1 support
-- Mapper 3 / CNROM support
-- Initial mapper 4 / MMC3 support
 - CHR ROM and CHR RAM
 - Horizontal, vertical, and single-screen nametable mirroring
 - Save RAM import/export for host-managed battery saves
+- NTSC and PAL timing profiles
 
-Host applications can persist battery-backed saves by reading `Nes.saveRam()` and restoring it with `Nes.loadSaveRam()`. Four-screen mirroring is not implemented yet and is rejected at load time.
+## Usage
 
-Typical host loop: load ROM bytes with `Nes.load`, optionally restore save bytes with `Nes.loadSaveRam`, call `Nes.reset`, then repeatedly call `Nes.stepFrame`, read `Nes.framebuffer`, play the returned audio samples, and persist `Nes.saveRam` when needed.
+The core is designed to be host-agnostic. Host applications can persist battery-backed saves by reading `Nes.saveRam()` and restoring it with `Nes.loadSaveRam()`.
+
+Typical host loop:
+
+```zig
+const Nes = @import("nes").Nes;
+
+var nes = Nes.init(allocator);
+defer nes.deinit();
+
+try nes.load(rom_bytes);
+nes.reset();
+
+while (true) {
+    const result = try nes.stepFrame();
+    // Use nes.framebuffer() to get pixels
+    // Use result.audio for the frame's audio samples
+}
+```
 
 ## Requirements
 
 - Zig 0.16.0 or newer
 
-## Build
+## Build & Test
 
 ```sh
 zig build
-```
-
-## Test
-
-```sh
 zig build test
 ```
 

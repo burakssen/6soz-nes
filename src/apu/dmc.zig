@@ -1,8 +1,9 @@
 const Dmc = @This();
+const Timing = @import("timing");
 
 pub const MemoryReader = struct {
-    ptr: *const anyopaque,
-    read_fn: *const fn (ptr: *const anyopaque, addr: u16) u8,
+    ptr: *anyopaque,
+    read_fn: *const fn (ptr: *anyopaque, addr: u16) u8,
 
     pub fn init(ptr: anytype) MemoryReader {
         const T = @TypeOf(ptr);
@@ -11,8 +12,8 @@ pub const MemoryReader = struct {
         const Child = info.pointer.child;
 
         const VTable = struct {
-            pub fn read(p: *const anyopaque, addr: u16) u8 {
-                const self: *const Child = @ptrCast(@alignCast(p));
+            pub fn read(p: *anyopaque, addr: u16) u8 {
+                const self: T = @ptrCast(@alignCast(p));
                 return Child.read(self, addr);
             }
         };
@@ -30,8 +31,10 @@ loop_flag: bool = false,
 irq_pending: bool = false,
 enabled: bool = false,
 
-timer_period: u16 = periodTable(0),
-timer_counter: u16 = periodTable(0),
+timer_period: u16 = Timing.ntsc.dmcPeriod(0),
+timer_counter: u16 = Timing.ntsc.dmcPeriod(0),
+timing: Timing = Timing.ntsc,
+rate_index: u4 = 0,
 
 output_level: u7 = 0,
 sample_address: u16 = 0xc000,
@@ -50,7 +53,8 @@ pub fn write(self: *Dmc, reg: u16, value: u8) void {
         0 => {
             self.irq_enabled = (value & 0x80) != 0;
             self.loop_flag = (value & 0x40) != 0;
-            self.timer_period = periodTable(value & 0x0f);
+            self.rate_index = @truncate(value & 0x0f);
+            self.timer_period = self.timing.dmcPeriod(self.rate_index);
             if (!self.irq_enabled) self.irq_pending = false;
         },
         1 => self.output_level = @as(u7, @truncate(value & 0x7f)),
@@ -124,9 +128,4 @@ fn clockOutput(self: *Dmc) void {
 fn restartSample(self: *Dmc) void {
     self.current_address = self.sample_address;
     self.bytes_remaining = self.sample_length;
-}
-
-fn periodTable(index: u8) u16 {
-    const table = [_]u16{ 428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54 };
-    return table[index & 0x0f];
 }

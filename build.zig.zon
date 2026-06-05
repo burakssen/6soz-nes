@@ -2,12 +2,12 @@
     .name = ._6soz_nes,
     .version = "0.0.1",
     .dependencies = .{
-        .core = .{
-            .url = "git+https://github.com/burakssen/6soz-core#17711fa6fef4220572a463d8c4e4e87a75012118",
-            .hash = "_6soz_core-0.0.1-hf4HBleHAACZXdquuMAFtMeTiwTdICEaC2254QMEzNe8",
+        .mos6502 = .{
+            .url = "../6soz-mos6502",
+            .hash = "_6soz_mos6502-0.0.1-TdAexgWJAACaGF3QdC4mBqT67Qw6Rll7qydTK21eqo_H",
         },
     },
     .minimum_zig_version = "0.16.0",
-    .paths = .{""},
+    .paths = .{ "build.zig", "build.zig.zon", "src", "README.md", "LICENCE" },
     .fingerprint = 0x9fa1091ed4fb5eda,
 }

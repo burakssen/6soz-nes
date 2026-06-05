@@ -4,12 +4,18 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const core_dep = b.dependency("core", .{
+    const mos6502_dep = b.dependency("mos6502", .{
         .target = target,
         .optimize = optimize,
     });
 
-    const core_mod = core_dep.module("core");
+    const mos6502_mod = mos6502_dep.module("mos6502");
+
+    const timing_mod = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .root_source_file = b.path("src/timing.zig"),
+    });
 
     const cartridge_mod = b.createModule(.{
         .target = target,
@@ -21,6 +27,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .root_source_file = b.path("src/apu/apu.zig"),
+        .imports = &.{
+            .{ .name = "timing", .module = timing_mod },
+        },
     });
 
     const ppu_mod = b.createModule(.{
@@ -29,6 +38,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/ppu/ppu.zig"),
         .imports = &.{
             .{ .name = "cartridge", .module = cartridge_mod },
+            .{ .name = "timing", .module = timing_mod },
         },
     });
 
@@ -37,10 +47,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .root_source_file = b.path("src/nes.zig"),
         .imports = &.{
-            .{ .name = "core", .module = core_mod },
+            .{ .name = "mos6502", .module = mos6502_mod },
             .{ .name = "apu", .module = apu_mod },
             .{ .name = "ppu", .module = ppu_mod },
             .{ .name = "cartridge", .module = cartridge_mod },
+            .{ .name = "timing", .module = timing_mod },
         },
     });
 
@@ -62,7 +73,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const test_step = b.step("test", "Run 6soz-nes tests");
-    inline for (&.{ nes_mod, bus_mod, cartridge_mod, ppu_mod, ppu_input_mod, apu_mod }) |test_mod| {
+    inline for (&.{ nes_mod, bus_mod, cartridge_mod, ppu_mod, ppu_input_mod, apu_mod, timing_mod }) |test_mod| {
         const test_cmd = b.addTest(.{ .root_module = test_mod });
         const run_test = b.addRunArtifact(test_cmd);
         test_step.dependOn(&run_test.step);

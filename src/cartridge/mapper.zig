@@ -49,13 +49,6 @@ pub const Mapper = union(enum) {
         };
     }
 
-    pub fn acknowledgeIrq(self: *Mapper) void {
-        switch (self.*) {
-            .mmc3 => |*m| m.irq_active = false,
-            else => {},
-        }
-    }
-
     pub fn mirroring(self: *const Mapper) common.Mirroring {
         return switch (self.*) {
             inline else => |*m| m.mirroring(),

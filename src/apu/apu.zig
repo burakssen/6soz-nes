@@ -6,18 +6,17 @@ const Noise = @import("noise.zig");
 const Dmc = @import("dmc.zig");
 const DcBlocker = @import("dc_blocker.zig");
 const OnePoleLowPass = @import("one_pole_low_pass.zig");
+const Timing = @import("timing");
 
 const Apu = @This();
 
 pub const sample_rate = 48_000;
-pub const cpu_rate = 1_789_773;
 pub const MemoryReader = Dmc.MemoryReader;
 pub const StepResult = struct {
     audio: []const f32,
     dmc_stall_cycles: u32 = 0,
 };
 const max_samples = 2048;
-const frame_period = 7457;
 
 pulse: [2]Pulse = .{ .{ .channel = 0 }, .{ .channel = 1 } },
 triangle: Triangle = .{},
@@ -31,10 +30,24 @@ frame_mode_5_step: bool = false,
 frame_irq_inhibit: bool = false,
 frame_irq_pending: bool = false,
 pulse_noise_clock: bool = false,
+timing: Timing = Timing.ntsc,
 high_pass: DcBlocker = .{},
 low_pass: OnePoleLowPass = .{},
 samples: [max_samples]f32 = [_]f32{0} ** max_samples,
 sample_count: usize = 0,
+
+pub fn setTiming(self: *Apu, timing: Timing) void {
+    self.timing = timing;
+    self.sample_accum = 0;
+    self.frame_cycle_accum = 0;
+    self.frame_step = 0;
+    self.noise.timing = timing;
+    self.noise.timer_period = timing.noisePeriod(self.noise.regs[2] & 0x0f);
+    self.noise.timer_counter = self.noise.timer_period;
+    self.dmc.timing = timing;
+    self.dmc.timer_period = timing.dmcPeriod(self.dmc.rate_index);
+    self.dmc.timer_counter = self.dmc.timer_period;
+}
 
 pub fn writeRegister(self: *Apu, addr: u16, value: u8) void {
     switch (addr) {
@@ -83,8 +96,8 @@ pub fn tickWithMemory(self: *Apu, cpu_cycles: u32, reader: ?MemoryReader) StepRe
     while (i < cpu_cycles) : (i += 1) {
         dmc_stall_cycles += self.clockCpuCycle(reader);
         self.sample_accum += sample_rate;
-        if (self.sample_accum >= cpu_rate and self.sample_count < self.samples.len) {
-            self.sample_accum -= cpu_rate;
+        if (self.sample_accum >= self.timing.cpu_rate and self.sample_count < self.samples.len) {
+            self.sample_accum -= self.timing.cpu_rate;
             self.samples[self.sample_count] = self.outputSample();
             self.sample_count += 1;
         }
@@ -126,8 +139,8 @@ fn clockCpuCycle(self: *Apu, reader: ?MemoryReader) u32 {
     }
 
     self.frame_cycle_accum += 1;
-    if (self.frame_cycle_accum >= frame_period) {
-        self.frame_cycle_accum -= frame_period;
+    if (self.frame_cycle_accum >= self.timing.apu_frame_period) {
+        self.frame_cycle_accum -= self.timing.apu_frame_period;
         self.clockFrameSequencer();
     }
     return dmc_stalls;
@@ -188,7 +201,7 @@ fn mixNes(pulse1: u4, pulse2: u4, triangle: u4, noise: u4, dmc: u7) f32 {
 
 test "4-step frame counter raises and status read clears frame IRQ" {
     var apu = Apu{};
-    _ = apu.tick(frame_period * 4);
+    _ = apu.tick(Timing.ntsc.apu_frame_period * 4);
 
     try std.testing.expect(apu.pollIrq());
     try std.testing.expectEqual(@as(u8, 0x40), apu.readStatus() & 0x40);
@@ -198,7 +211,7 @@ test "4-step frame counter raises and status read clears frame IRQ" {
 test "frame IRQ inhibit clears and suppresses frame IRQ" {
     var apu = Apu{};
     apu.writeRegister(0x4017, 0x40);
-    _ = apu.tick(frame_period * 4);
+    _ = apu.tick(Timing.ntsc.apu_frame_period * 4);
 
     try std.testing.expect(!apu.pollIrq());
     try std.testing.expectEqual(@as(u8, 0), apu.readStatus() & 0x40);

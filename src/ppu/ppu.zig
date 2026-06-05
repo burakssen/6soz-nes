@@ -7,6 +7,7 @@ pub const StepResult = @import("step_result.zig");
 const Cartridge = @import("cartridge");
 
 const Ppu = @This();
+const Timing = @import("timing");
 
 pub const Mirroring = enum {
     horizontal,
@@ -41,6 +42,7 @@ cycles: u32 = 0,
 scanline: i16 = 0,
 nmi_occurred: bool = false,
 frame_complete: bool = false,
+timing: Timing = Timing.ntsc,
 
 // Background fetch buffers
 bg_next_nametable: u8 = 0,
@@ -236,7 +238,7 @@ pub fn tick(self: *Ppu) bool {
     if (self.cycles >= 341) {
         self.cycles = 0;
         self.scanline += 1;
-        if (self.scanline >= 261) {
+        if (self.scanline >= @as(i16, @intCast(self.timing.ppu_scanlines - 1))) {
             self.scanline = -1;
             self.frame_complete = true;
         }
@@ -503,6 +505,18 @@ test "PPU reports frame completion when scanline wraps" {
     try std.testing.expectEqual(@as(u32, 0), ppu.cycles);
     try std.testing.expect(ppu.takeFrameComplete());
     try std.testing.expect(!ppu.takeFrameComplete());
+}
+
+test "PAL PPU wraps after 312 scanlines" {
+    var ppu = Ppu{
+        .scanline = 310,
+        .cycles = 340,
+        .timing = Timing.pal,
+    };
+
+    try std.testing.expect(!ppu.tick());
+    try std.testing.expectEqual(@as(i16, -1), ppu.scanline);
+    try std.testing.expect(ppu.takeFrameComplete());
 }
 
 test "PPU NMI and frame completion are separate signals" {

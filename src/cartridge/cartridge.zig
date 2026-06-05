@@ -59,10 +59,19 @@ fn parseInes(data: *const [16]u8) Header {
         .mirroring = mirroring,
         .has_trainer = (flags6 & 0x04) != 0,
         .has_battery = (flags6 & 0x02) != 0,
+        .timing_mode = if ((data[9] & 0x01) != 0) .pal else .ntsc,
     };
 }
 
-fn parseNes2(data: *const [16]u8) Header {
+fn exponentSize(encoded: u8) !usize {
+    const multiplier = @as(usize, encoded & 0x03) * 2 + 1;
+    const exponent = (encoded >> 2) & 0x3f;
+    if (exponent >= @bitSizeOf(usize)) return error.InvalidHeader;
+    const shift: std.math.Log2Int(usize) = @intCast(exponent);
+    return std.math.shlExact(usize, multiplier, shift) catch error.InvalidHeader;
+}
+
+fn parseNes2(data: *const [16]u8) !Header {
     const prg_lsb = data[4];
     const chr_lsb = data[5];
     const flags6 = data[6];
@@ -74,9 +83,7 @@ fn parseNes2(data: *const [16]u8) Header {
     if (prg_msb != 0x0f) {
         prg_size = ((@as(usize, prg_msb) << 8) | prg_lsb) * prg_bank_size;
     } else {
-        const multiplier = prg_lsb & 0x03;
-        const exponent = (prg_lsb >> 2) & 0x3F;
-        prg_size = (@as(usize, multiplier) * 2 + 1) << @intCast(exponent);
+        prg_size = try exponentSize(prg_lsb);
     }
 
     var chr_rom_size: usize = 0;
@@ -84,9 +91,7 @@ fn parseNes2(data: *const [16]u8) Header {
     if (chr_msb != 0x0f) {
         chr_rom_size = ((@as(usize, chr_msb) << 8) | chr_lsb) * chr_bank_size;
     } else {
-        const multiplier = chr_lsb & 0x03;
-        const exponent = (chr_lsb >> 2) & 0x3F;
-        chr_rom_size = (@as(usize, multiplier) * 2 + 1) << @intCast(exponent);
+        chr_rom_size = try exponentSize(chr_lsb);
     }
 
     const mapper_low = (flags7 & 0xf0) | (flags6 >> 4);
@@ -151,18 +156,23 @@ pub fn load(allocator: std.mem.Allocator, data: []const u8) !Cartridge {
 
     const is_nes2 = (data[7] & 0x0c) == 0x08;
     const header = if (is_nes2)
-        parseNes2(data[0..16])
+        try parseNes2(data[0..16])
     else
         parseInes(data[0..16]);
 
     if (header.mirroring == .four_screen) return error.UnsupportedMirroring;
+    if (header.timing_mode == .multiple or header.timing_mode == .dendy)
+        return error.UnsupportedTimingMode;
     if (header.mapper_id == 0 and header.prg_size != prg_bank_size and header.prg_size != 2 * prg_bank_size)
         return error.InvalidPrgSize;
 
     const prg_start = 16 + (if (header.has_trainer) @as(usize, 512) else 0);
-    const chr_start = prg_start + header.prg_size;
+    const chr_start = std.math.add(usize, prg_start, header.prg_size) catch
+        return error.InvalidHeader;
+    const file_size = std.math.add(usize, chr_start, header.chr_rom_size) catch
+        return error.InvalidHeader;
 
-    if (data.len < chr_start + header.chr_rom_size)
+    if (data.len < file_size)
         return error.IncompleteFile;
 
     const prg_rom = try allocator.alloc(u8, header.prg_size);
@@ -177,9 +187,11 @@ pub fn load(allocator: std.mem.Allocator, data: []const u8) !Cartridge {
     const chr_size = if (header.chr_rom_size > 0)
         header.chr_rom_size
     else if (is_nes2)
-        header.chr_ram_size + header.chr_nvram_size
+        std.math.add(usize, header.chr_ram_size, header.chr_nvram_size) catch
+            return error.InvalidHeader
     else
         chr_bank_size;
+    if (chr_size == 0) return error.InvalidChrSize;
 
     const chr = try allocator.alloc(u8, chr_size);
     errdefer allocator.free(chr);
@@ -195,7 +207,8 @@ pub fn load(allocator: std.mem.Allocator, data: []const u8) !Cartridge {
     }
 
     const prg_ram_size = if (header.prg_ram_size > 0 or header.prg_nvram_size > 0)
-        header.prg_ram_size + header.prg_nvram_size
+        std.math.add(usize, header.prg_ram_size, header.prg_nvram_size) catch
+            return error.InvalidHeader
     else if (header.mapper_id == 1 or header.mapper_id == 4 or header.has_battery)
         @as(usize, 8192)
     else
@@ -626,4 +639,65 @@ test "loads NES 2.0 with exponent sizes, submapper, RAM and timing" {
     try std.testing.expectEqual(@as(usize, 256), cartridge.prg_ram.len); // 128 + 128
     try std.testing.expectEqual(@as(usize, 128), cartridge.saveRam().?.len);
     try std.testing.expectEqual(common.TimingMode.pal, cartridge.timing_mode);
+}
+
+test "legacy iNES TV flag selects PAL timing" {
+    const allocator = std.testing.allocator;
+    const prg_size = 16 * 1024;
+    const chr_size = 8 * 1024;
+
+    var data = try allocator.alloc(u8, 16 + prg_size + chr_size);
+    defer allocator.free(data);
+    @memset(data, 0);
+    @memcpy(data[0..4], "NES\x1a");
+    data[4] = 1;
+    data[5] = 1;
+    data[9] = 1;
+
+    var cartridge = try Cartridge.load(allocator, data);
+    defer cartridge.deinit(allocator);
+
+    try std.testing.expectEqual(common.TimingMode.pal, cartridge.timing_mode);
+}
+
+test "rejects unsupported NES 2.0 timing modes" {
+    const allocator = std.testing.allocator;
+    const prg_size = 16 * 1024;
+    const chr_size = 8 * 1024;
+
+    var data = try allocator.alloc(u8, 16 + prg_size + chr_size);
+    defer allocator.free(data);
+    @memset(data, 0);
+    @memcpy(data[0..4], "NES\x1a");
+    data[4] = 1;
+    data[5] = 1;
+    data[7] = 0x08;
+    data[12] = 2;
+
+    try std.testing.expectError(error.UnsupportedTimingMode, Cartridge.load(allocator, data));
+}
+
+test "rejects overflowing NES 2.0 exponent sizes" {
+    var data = [_]u8{0} ** 16;
+    @memcpy(data[0..4], "NES\x1a");
+    data[4] = 0xff;
+    data[7] = 0x08;
+    data[9] = 0x0f;
+
+    try std.testing.expectError(
+        error.InvalidHeader,
+        Cartridge.load(std.testing.allocator, &data),
+    );
+}
+
+test "rejects NES 2.0 cartridges without CHR ROM or RAM" {
+    var data = [_]u8{0} ** (16 + prg_bank_size);
+    @memcpy(data[0..4], "NES\x1a");
+    data[4] = 1;
+    data[7] = 0x08;
+
+    try std.testing.expectError(
+        error.InvalidChrSize,
+        Cartridge.load(std.testing.allocator, &data),
+    );
 }

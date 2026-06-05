@@ -23,7 +23,7 @@ controller_strobe: bool = false,
 dma_stall_cycles: u16 = 0,
 cpu_cycle_is_odd: bool = false,
 
-pub fn read(self: *const Bus, addr: u16) u8 {
+pub fn read(self: *Bus, addr: u16) u8 {
     return switch (addr) {
         // RAM (0x0000 - 0x1FFF, mirrored every 0x0800)
         0x0000...0x1fff => self.ram[addr & 0x07ff],
@@ -33,13 +33,11 @@ pub fn read(self: *const Bus, addr: u16) u8 {
 
         // APU & I/O
         0x4016 => blk: {
-            const bus = @constCast(self);
-            const bit = bus.readControllerBit(0);
+            const bit = self.readControllerBit(0);
             break :blk 0x40 | bit;
         },
         0x4017 => blk: {
-            const bus = @constCast(self);
-            const bit = bus.readControllerBit(1);
+            const bit = self.readControllerBit(1);
             break :blk 0x40 | bit;
         },
         0x4015 => if (self.apu) |apu| apu.readStatus() else 0,

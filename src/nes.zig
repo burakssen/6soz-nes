@@ -1,5 +1,6 @@
 const std = @import("std");
-const core = @import("core");
+const mos6502 = @import("mos6502");
+const Timing = @import("timing");
 
 pub const Ppu = @import("ppu");
 pub const Apu = @import("apu");
@@ -12,7 +13,7 @@ const Nes = @This();
 const max_frame_audio_samples = 4096;
 const max_step_audio_samples = 256;
 
-cpu: core.Cpu = .{},
+cpu: mos6502.Cpu = .{ .variant = .ricoh_2a03 },
 bus: Bus,
 ppu: Ppu = .{},
 apu: Apu = .{},
@@ -23,10 +24,12 @@ frame_audio: [max_frame_audio_samples]f32 = [_]f32{0} ** max_frame_audio_samples
 frame_audio_count: usize = 0,
 step_audio: [max_step_audio_samples]f32 = [_]f32{0} ** max_step_audio_samples,
 step_audio_count: usize = 0,
+timing: Timing = Timing.ntsc,
+ppu_clock_accumulator: u64 = 0,
 
 pub fn init(allocator: std.mem.Allocator) Nes {
     return .{
-        .cpu = .{ .decimal_disabled = true },
+        .cpu = .{ .variant = .ricoh_2a03 },
         .ppu = .{},
         .bus = .{ .ppu = undefined },
         .apu = .{},
@@ -35,12 +38,15 @@ pub fn init(allocator: std.mem.Allocator) Nes {
         .frame_audio_count = 0,
         .step_audio = [_]f32{0} ** max_step_audio_samples,
         .step_audio_count = 0,
+        .timing = Timing.ntsc,
+        .ppu_clock_accumulator = 0,
     };
 }
 
 pub fn reset(self: *Nes) void {
     self.connectDevices();
-    var cpu_bus = core.Bus.init(&self.bus);
+    self.ppu_clock_accumulator = 0;
+    var cpu_bus = mos6502.Bus.init(&self.bus);
     self.cpu.reset(&cpu_bus);
 }
 
@@ -52,15 +58,16 @@ pub fn deinit(self: *Nes) void {
 }
 
 pub fn load(self: *Nes, data: []const u8) !void {
+    var replacement = try Cartridge.load(self.allocator, data);
+    errdefer replacement.deinit(self.allocator);
+
     if (self.cart) |*c| c.deinit(self.allocator);
-    self.cart = null;
-    self.bus.mapper = null;
-    self.ppu.mapper = null;
-
-    var cartridge = try Cartridge.load(self.allocator, data);
-    errdefer cartridge.deinit(self.allocator);
-
-    self.cart = cartridge;
+    self.cart = replacement;
+    self.setTiming(switch (self.cart.?.timing_mode) {
+        .ntsc => Timing.ntsc,
+        .pal => Timing.pal,
+        .multiple, .dendy => unreachable,
+    });
     self.connectDevices();
 }
 
@@ -68,24 +75,23 @@ pub fn step(self: *Nes) !Ppu.StepResult {
     self.connectDevices();
     self.latchInput();
     self.step_audio_count = 0;
-    var cpu_bus = core.Bus.init(&self.bus);
+    var cpu_bus = mos6502.Bus.init(&self.bus);
     self.bus.setCpuCycleParity(self.cpu.cycles);
-    const cpu_cycles = try self.cpu.step(&cpu_bus);
+    const cpu_result = try self.cpu.step(&cpu_bus);
     const dma_cycles = self.bus.takeDmaStallCycles();
-    var total_cpu_cycles = @as(u32, cpu_cycles);
+    var total_cpu_cycles = @as(u32, cpu_result.cycles);
     total_cpu_cycles += dma_cycles;
     self.cpu.cycles += dma_cycles;
 
-    total_cpu_cycles += self.advanceDevices(@as(u32, cpu_cycles), &cpu_bus);
-    if (dma_cycles > 0) total_cpu_cycles += self.advanceDevices(dma_cycles, &cpu_bus);
+    total_cpu_cycles += try self.advanceDevices(@as(u32, cpu_result.cycles), &cpu_bus);
+    if (dma_cycles > 0) total_cpu_cycles += try self.advanceDevices(dma_cycles, &cpu_bus);
 
     const mapper_irq = if (self.cart) |*c| c.mapper.irqActive() else false;
     if (self.apu.pollIrq() or mapper_irq) {
         const irq_cycles = self.cpu.irq(&cpu_bus);
         if (irq_cycles > 0) {
             total_cpu_cycles += irq_cycles;
-            if (mapper_irq) self.cart.?.mapper.acknowledgeIrq();
-            total_cpu_cycles += self.advanceDevices(irq_cycles, &cpu_bus);
+            total_cpu_cycles += try self.advanceDevices(irq_cycles, &cpu_bus);
         }
     }
     const frame_complete = self.ppu.takeFrameComplete();
@@ -104,7 +110,7 @@ pub fn stepFrame(self: *Nes) !Ppu.StepResult {
     while (true) {
         const result = try self.step();
         frame_cycles += result.cycles;
-        self.appendFrameAudio(result.audio);
+        try self.appendFrameAudio(result.audio);
 
         if (result.frame_complete) {
             return .{
@@ -124,6 +130,14 @@ pub fn framebuffer(self: *const Nes) []const u32 {
     return &self.ppu.framebuffer;
 }
 
+pub fn frameRate(self: *const Nes) u16 {
+    return self.timing.frame_rate;
+}
+
+pub fn audioSampleRate(_: *const Nes) u32 {
+    return Apu.sample_rate;
+}
+
 pub fn saveRam(self: *const Nes) ?[]const u8 {
     if (self.cart) |*c| return c.saveRam();
     return null;
@@ -138,27 +152,31 @@ fn latchInput(self: *Nes) void {
     self.bus.setControllerState(0, self.input.toNesControllerByte());
 }
 
-fn appendFrameAudio(self: *Nes, audio: []const f32) void {
-    const available = self.frame_audio.len - self.frame_audio_count;
-    const count = @min(available, audio.len);
-    @memcpy(self.frame_audio[self.frame_audio_count..][0..count], audio[0..count]);
-    self.frame_audio_count += count;
+fn appendFrameAudio(self: *Nes, audio: []const f32) !void {
+    if (audio.len > self.frame_audio.len - self.frame_audio_count) return error.AudioBufferOverflow;
+    @memcpy(self.frame_audio[self.frame_audio_count..][0..audio.len], audio);
+    self.frame_audio_count += audio.len;
 }
 
-fn appendStepAudio(self: *Nes, audio: []const f32) void {
-    const available = self.step_audio.len - self.step_audio_count;
-    const count = @min(available, audio.len);
-    @memcpy(self.step_audio[self.step_audio_count..][0..count], audio[0..count]);
-    self.step_audio_count += count;
+fn appendStepAudio(self: *Nes, audio: []const f32) !void {
+    if (audio.len > self.step_audio.len - self.step_audio_count) return error.AudioBufferOverflow;
+    @memcpy(self.step_audio[self.step_audio_count..][0..audio.len], audio);
+    self.step_audio_count += audio.len;
 }
 
-fn advanceDevices(self: *Nes, cycles: u32, cpu_bus: *core.Bus) u32 {
+fn advanceDevices(self: *Nes, cycles: u32, cpu_bus: *mos6502.Bus) !u32 {
     var extra_cycles: u32 = 0;
     var pending = cycles;
 
     while (pending > 0) {
-        var i: u32 = 0;
-        while (i < pending * 3) : (i += 1) {
+        const current = pending;
+        pending = 0;
+        self.ppu_clock_accumulator += @as(u64, current) * self.timing.ppu_clock_numerator;
+        const ppu_ticks = self.ppu_clock_accumulator / self.timing.ppu_clock_denominator;
+        self.ppu_clock_accumulator %= self.timing.ppu_clock_denominator;
+
+        var i: u64 = 0;
+        while (i < ppu_ticks) : (i += 1) {
             if (self.ppu.tick()) {
                 const nmi_cycles = self.cpu.nmi(cpu_bus);
                 extra_cycles += nmi_cycles;
@@ -167,17 +185,24 @@ fn advanceDevices(self: *Nes, cycles: u32, cpu_bus: *core.Bus) u32 {
         }
 
         const reader = Apu.MemoryReader.init(&self.bus);
-        const apu_result = self.apu.tickWithMemory(pending, reader);
-        self.appendStepAudio(apu_result.audio);
+        const apu_result = self.apu.tickWithMemory(current, reader);
+        try self.appendStepAudio(apu_result.audio);
 
-        pending = apu_result.dmc_stall_cycles;
-        if (pending > 0) {
-            self.cpu.cycles += pending;
-            extra_cycles += pending;
+        if (apu_result.dmc_stall_cycles > 0) {
+            self.cpu.cycles += apu_result.dmc_stall_cycles;
+            extra_cycles += apu_result.dmc_stall_cycles;
+            pending += apu_result.dmc_stall_cycles;
         }
     }
 
     return extra_cycles;
+}
+
+fn setTiming(self: *Nes, timing: Timing) void {
+    self.timing = timing;
+    self.ppu.timing = timing;
+    self.apu.setTiming(timing);
+    self.ppu_clock_accumulator = 0;
 }
 
 fn connectDevices(self: *Nes) void {
@@ -237,6 +262,25 @@ test "NES loads, resets, steps, and exposes framebuffer" {
     try std.testing.expect(result.cycles > 0);
     try std.testing.expect(!result.frame_complete);
     try std.testing.expectEqual(@as(usize, Ppu.Video.width * Ppu.Video.height), nes.framebuffer().len);
+}
+
+test "PAL ROM selects PAL metadata and fractional PPU clocking" {
+    const allocator = std.testing.allocator;
+    const rom = try makeTestRom(allocator, 0x00, 1);
+    defer allocator.free(rom);
+    rom[9] = 1;
+
+    var nes = Nes.init(allocator);
+    defer nes.deinit();
+
+    try nes.load(rom);
+    nes.reset();
+    _ = try nes.step();
+
+    try std.testing.expectEqual(@as(u16, 50), nes.frameRate());
+    try std.testing.expectEqual(Timing.Region.pal, nes.timing.region);
+    try std.testing.expectEqual(@as(u64, 2), nes.ppu_clock_accumulator);
+    try std.testing.expectEqual(@as(u32, 6), nes.ppu.cycles);
 }
 
 test "NES steps a complete frame" {
@@ -356,4 +400,34 @@ test "NES save RAM API handles missing cartridge and missing RAM" {
     try nes.load(rom);
     try std.testing.expectEqual(@as(?[]const u8, null), nes.saveRam());
     try std.testing.expectError(error.NoSaveRam, nes.loadSaveRam(&[_]u8{}));
+}
+
+test "interrupt cycles advance every device" {
+    const allocator = std.testing.allocator;
+    const rom = try makeTestRom(allocator, 0x00, 1);
+    defer allocator.free(rom);
+
+    var nes = Nes.init(allocator);
+    defer nes.deinit();
+    try nes.load(rom);
+    nes.reset();
+    nes.ppu.ctrl = 0x80;
+    nes.ppu.scanline = 241;
+    nes.ppu.cycles = 0;
+
+    var cpu_bus = mos6502.Bus.init(&nes.bus);
+    const extra = try nes.advanceDevices(1, &cpu_bus);
+
+    try std.testing.expectEqual(@as(u32, 7), extra);
+    try std.testing.expectEqual(@as(u32, 24), nes.ppu.cycles);
+}
+
+test "frame audio overflow is reported" {
+    var nes = Nes.init(std.testing.allocator);
+    nes.frame_audio_count = nes.frame_audio.len;
+
+    try std.testing.expectError(
+        error.AudioBufferOverflow,
+        nes.appendFrameAudio(&[_]f32{0}),
+    );
 }
