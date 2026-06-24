@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const utils = @import("utils.zig");
+
 
 const Triangle = @This();
 
@@ -19,7 +19,7 @@ pub fn write(self: *Triangle, reg: u16, value: u8) void {
         2 => self.timer_period = (self.timer_period & 0x0700) | value,
         3 => {
             self.timer_period = (self.timer_period & 0x00ff) | (@as(u16, value & 0x07) << 8);
-            if (self.enabled) self.length_counter = utils.lengthTable(value >> 3);
+            if (self.enabled) self.length_counter = lengthTable(value >> 3);
             self.linear_reload = true;
         },
         else => {},
@@ -63,4 +63,14 @@ fn control(self: *const Triangle) bool {
 
 fn triangleValue(step: u5) u4 {
     return if (step < 16) 15 - @as(u4, @truncate(step)) else @as(u4, @truncate(step - 16));
+}
+
+fn lengthTable(index: u8) u8 {
+    const table = [_]u8{
+        10,  254, 20, 2,  40, 4,  80, 6,
+        160, 8,   60, 10, 14, 12, 26, 14,
+        12,  16,  24, 18, 48, 20, 96, 22,
+        192, 24,  72, 26, 16, 28, 32, 30,
+    };
+    return table[index & 0x1f];
 }

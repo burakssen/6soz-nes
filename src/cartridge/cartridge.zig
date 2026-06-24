@@ -1,9 +1,22 @@
 const std = @import("std");
 
-pub const common = @import("common.zig");
 pub const Mapper = @import("mapper.zig").Mapper;
-pub const Mirroring = common.Mirroring;
-pub const TimingMode = common.TimingMode;
+const State = @import("state_io.zig");
+
+pub const Mirroring = enum {
+    single_screen_lower,
+    single_screen_upper,
+    horizontal,
+    vertical,
+    four_screen,
+};
+
+pub const TimingMode = enum {
+    ntsc,
+    pal,
+    multiple,
+    dendy,
+};
 
 const Cartridge = @This();
 
@@ -16,7 +29,7 @@ prg_ram: []u8,
 mapper: Mapper,
 mapper_id: u16,
 submapper_id: u8,
-timing_mode: common.TimingMode,
+timing_mode: TimingMode,
 has_battery: bool,
 save_ram_start: usize,
 save_ram_len: usize,
@@ -26,12 +39,12 @@ const Header = struct {
     chr_rom_size: usize,
     mapper_id: u16,
     submapper_id: u8 = 0,
-    mirroring: common.Mirroring,
+    mirroring: Mirroring,
     prg_ram_size: usize = 0,
     prg_nvram_size: usize = 0,
     chr_ram_size: usize = 0,
     chr_nvram_size: usize = 0,
-    timing_mode: common.TimingMode = .ntsc,
+    timing_mode: TimingMode = .ntsc,
     has_trainer: bool,
     has_battery: bool = false,
 };
@@ -45,7 +58,7 @@ fn parseInes(data: *const [16]u8) Header {
 
     const mapper_id = @as(u16, (flags7 & 0xf0) | (flags6 >> 4));
 
-    const mirroring: common.Mirroring = if ((flags6 & 0x08) != 0)
+    const mirroring: Mirroring = if ((flags6 & 0x08) != 0)
         .four_screen
     else if ((flags6 & 0x01) != 0)
         .vertical
@@ -114,7 +127,7 @@ fn parseNes2(data: *const [16]u8) !Header {
     if (chr_ram_shift > 0) chr_ram_size = @as(usize, 64) << @intCast(chr_ram_shift);
     if (chr_nvram_shift > 0) chr_nvram_size = @as(usize, 64) << @intCast(chr_nvram_shift);
 
-    const timing_mode: common.TimingMode = switch (data[12] & 0x03) {
+    const timing_mode: TimingMode = switch (data[12] & 0x03) {
         0 => .ntsc,
         1 => .pal,
         2 => .multiple,
@@ -122,7 +135,7 @@ fn parseNes2(data: *const [16]u8) !Header {
         else => unreachable,
     };
 
-    const mirroring: common.Mirroring = if ((flags6 & 0x08) != 0)
+    const mirroring: Mirroring = if ((flags6 & 0x08) != 0)
         .four_screen
     else if ((flags6 & 0x01) != 0)
         .vertical
@@ -242,6 +255,12 @@ pub fn load(allocator: std.mem.Allocator, data: []const u8) !Cartridge {
             .chr_is_ram = header.chr_rom_size == 0,
             .prg_ram = prg_ram,
         } },
+        2 => Mapper{ .uxrom = .{
+            .prg_rom = prg_rom,
+            .chr = chr,
+            .chr_is_ram = header.chr_rom_size == 0,
+            .mirroring_mode = header.mirroring,
+        } },
         3 => Mapper{ .cnrom = .{
             .prg_rom = prg_rom,
             .chr = chr,
@@ -254,6 +273,11 @@ pub fn load(allocator: std.mem.Allocator, data: []const u8) !Cartridge {
             .chr_is_ram = header.chr_rom_size == 0,
             .prg_ram = prg_ram,
             .mirroring_mode = header.mirroring,
+        } },
+        7 => Mapper{ .axrom = .{
+            .prg_rom = prg_rom,
+            .chr = chr,
+            .chr_is_ram = header.chr_rom_size == 0,
         } },
         else => return error.UnsupportedMapper,
     };
@@ -289,6 +313,52 @@ pub fn loadSaveRam(self: *Cartridge, data: []const u8) !void {
     if (self.save_ram_len == 0) return error.NoSaveRam;
     if (data.len != self.save_ram_len) return error.InvalidSaveRamSize;
     @memcpy(self.prg_ram[self.save_ram_start..][0..self.save_ram_len], data);
+}
+
+pub fn romHash(self: *const Cartridge) u64 {
+    var hash = std.hash.Wyhash.init(0x6e6573526f6d4861);
+    hash.update(self.prg_rom);
+    switch (self.mapper) {
+        inline else => |m| if (!m.chr_is_ram) hash.update(self.chr),
+    }
+    var meta: [4]u8 = undefined;
+    std.mem.writeInt(u16, meta[0..2], self.mapper_id, .little);
+    meta[2] = self.submapper_id;
+    meta[3] = @intFromEnum(self.timing_mode);
+    hash.update(&meta);
+    return hash.final();
+}
+
+pub fn saveState(self: *const Cartridge, allocator: std.mem.Allocator) ![]u8 {
+    var state = std.Io.Writer.Allocating.init(allocator);
+    defer state.deinit();
+    const writer = &state.writer;
+
+    try State.writeValue(writer, self.romHash());
+    try State.writeValue(writer, @as(u32, @intCast(self.chr.len)));
+    try writer.writeAll(self.chr);
+    try State.writeValue(writer, @as(u32, @intCast(self.prg_ram.len)));
+    try writer.writeAll(self.prg_ram);
+    try self.mapper.saveState(writer);
+
+    return state.toOwnedSlice();
+}
+
+pub fn loadState(self: *Cartridge, data: []const u8) !void {
+    var state = std.Io.Reader.fixed(data);
+    const reader = &state;
+
+    if ((try State.readValue(reader, u64)) != self.romHash()) return State.Error.StateKindMismatch;
+
+    const chr_len = try State.readValue(reader, u32);
+    if (chr_len != self.chr.len) return State.Error.InvalidState;
+    @memcpy(self.chr, try State.readBytes(reader, self.chr.len));
+
+    const prg_ram_len = try State.readValue(reader, u32);
+    if (prg_ram_len != self.prg_ram.len) return State.Error.InvalidState;
+    @memcpy(self.prg_ram, try State.readBytes(reader, self.prg_ram.len));
+
+    try self.mapper.loadState(reader);
 }
 
 test "loads iNES header and copies PRG and CHR ROM" {
@@ -399,7 +469,7 @@ test "rejects unsupported mapper" {
     @memcpy(data[0..4], "NES\x1a");
     data[4] = 1;
     data[5] = 1;
-    data[6] = 0x20;
+    data[6] = 0x50;
 
     try std.testing.expectError(error.UnsupportedMapper, Cartridge.load(allocator, data));
 }
@@ -638,7 +708,7 @@ test "loads NES 2.0 with exponent sizes, submapper, RAM and timing" {
     try std.testing.expectEqual(@as(u8, 1), cartridge.submapper_id);
     try std.testing.expectEqual(@as(usize, 256), cartridge.prg_ram.len); // 128 + 128
     try std.testing.expectEqual(@as(usize, 128), cartridge.saveRam().?.len);
-    try std.testing.expectEqual(common.TimingMode.pal, cartridge.timing_mode);
+    try std.testing.expectEqual(TimingMode.pal, cartridge.timing_mode);
 }
 
 test "legacy iNES TV flag selects PAL timing" {
@@ -657,7 +727,7 @@ test "legacy iNES TV flag selects PAL timing" {
     var cartridge = try Cartridge.load(allocator, data);
     defer cartridge.deinit(allocator);
 
-    try std.testing.expectEqual(common.TimingMode.pal, cartridge.timing_mode);
+    try std.testing.expectEqual(TimingMode.pal, cartridge.timing_mode);
 }
 
 test "rejects unsupported NES 2.0 timing modes" {
@@ -700,4 +770,76 @@ test "rejects NES 2.0 cartridges without CHR ROM or RAM" {
         error.InvalidChrSize,
         Cartridge.load(std.testing.allocator, &data),
     );
+}
+
+test "loads mapper 2 UxROM ROM" {
+    const allocator = std.testing.allocator;
+    const prg_size = 128 * 1024;
+    const chr_size = 0;
+
+    var data = try allocator.alloc(u8, 16 + prg_size + chr_size);
+    defer allocator.free(data);
+    @memset(data, 0);
+    @memcpy(data[0..4], "NES\x1a");
+    data[4] = 8;
+    data[5] = 0;
+    data[6] = 0x21;
+
+    for (0..8) |i| {
+        data[16 + i * prg_bank_size] = @as(u8, @intCast(i));
+    }
+
+    var cartridge = try Cartridge.load(allocator, data);
+    defer cartridge.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u16, 2), cartridge.mapper_id);
+    try std.testing.expectEqual(Cartridge.Mirroring.vertical, cartridge.mapper.mirroring());
+
+    try std.testing.expectEqual(@as(u8, 0), cartridge.mapper.prgRead(0x8000));
+    try std.testing.expectEqual(@as(u8, 7), cartridge.mapper.prgRead(0xc000));
+
+    cartridge.mapper.prgWrite(0x8000, 3);
+
+    try std.testing.expectEqual(@as(u8, 3), cartridge.mapper.prgRead(0x8000));
+    try std.testing.expectEqual(@as(u8, 7), cartridge.mapper.prgRead(0xc000));
+}
+
+test "loads mapper 7 AxROM ROM" {
+    const allocator = std.testing.allocator;
+    const prg_size = 128 * 1024;
+
+    var data = try allocator.alloc(u8, 16 + prg_size);
+    defer allocator.free(data);
+    @memset(data, 0);
+    @memcpy(data[0..4], "NES\x1a");
+    data[4] = 8; // 8 * 16KB = 128KB PRG ROM
+    data[5] = 0; // 0 CHR ROM
+    data[6] = 0x70; // mapper 7 lower nibble (flags6 >> 4)
+    data[7] = 0x00; // mapper 7 upper nibble (flags7 & 0xf0)
+
+    const axrom_bank_size = 32 * 1024;
+    for (0..4) |i| {
+        data[16 + i * axrom_bank_size] = @as(u8, @intCast(i));
+    }
+
+    var cartridge = try Cartridge.load(allocator, data);
+    defer cartridge.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u16, 7), cartridge.mapper_id);
+    try std.testing.expectEqual(Cartridge.Mirroring.single_screen_lower, cartridge.mapper.mirroring());
+
+    try std.testing.expectEqual(@as(u8, 0), cartridge.mapper.prgRead(0x8000));
+
+    // Write to switch to bank 2 and set upper single-screen mirroring
+    // (1 << 4) | 2 = 18 (0x12)
+    cartridge.mapper.prgWrite(0x8000, 0x12);
+
+    try std.testing.expectEqual(@as(u8, 2), cartridge.mapper.prgRead(0x8000));
+    try std.testing.expectEqual(Cartridge.Mirroring.single_screen_upper, cartridge.mapper.mirroring());
+
+    // Write to switch to bank 3 and set lower single-screen mirroring
+    cartridge.mapper.prgWrite(0x8000, 3);
+
+    try std.testing.expectEqual(@as(u8, 3), cartridge.mapper.prgRead(0x8000));
+    try std.testing.expectEqual(Cartridge.Mirroring.single_screen_lower, cartridge.mapper.mirroring());
 }

@@ -1,6 +1,7 @@
 const std = @import("std");
 const mos6502 = @import("mos6502");
 const Timing = @import("timing");
+const State = @import("state_io.zig");
 
 pub const Ppu = @import("ppu");
 pub const Apu = @import("apu");
@@ -12,6 +13,8 @@ const Nes = @This();
 
 const max_frame_audio_samples = 4096;
 const max_step_audio_samples = 256;
+const state_magic = "6SOZNES1";
+const state_version: u8 = 1;
 
 cpu: mos6502.Cpu = .{ .variant = .ricoh_2a03 },
 bus: Bus,
@@ -46,8 +49,7 @@ pub fn init(allocator: std.mem.Allocator) Nes {
 pub fn reset(self: *Nes) void {
     self.connectDevices();
     self.ppu_clock_accumulator = 0;
-    var cpu_bus = mos6502.Bus.init(&self.bus);
-    self.cpu.reset(&cpu_bus);
+    self.cpu.reset(&self.bus);
 }
 
 pub fn deinit(self: *Nes) void {
@@ -75,23 +77,22 @@ pub fn step(self: *Nes) !Ppu.StepResult {
     self.connectDevices();
     self.latchInput();
     self.step_audio_count = 0;
-    var cpu_bus = mos6502.Bus.init(&self.bus);
     self.bus.setCpuCycleParity(self.cpu.cycles);
-    const cpu_result = try self.cpu.step(&cpu_bus);
+    const cpu_result = try self.cpu.step(&self.bus);
     const dma_cycles = self.bus.takeDmaStallCycles();
     var total_cpu_cycles = @as(u32, cpu_result.cycles);
     total_cpu_cycles += dma_cycles;
     self.cpu.cycles += dma_cycles;
 
-    total_cpu_cycles += try self.advanceDevices(@as(u32, cpu_result.cycles), &cpu_bus);
-    if (dma_cycles > 0) total_cpu_cycles += try self.advanceDevices(dma_cycles, &cpu_bus);
+    total_cpu_cycles += try self.advanceDevices(@as(u32, cpu_result.cycles), &self.bus);
+    if (dma_cycles > 0) total_cpu_cycles += try self.advanceDevices(dma_cycles, &self.bus);
 
     const mapper_irq = if (self.cart) |*c| c.mapper.irqActive() else false;
     if (self.apu.pollIrq() or mapper_irq) {
-        const irq_cycles = self.cpu.irq(&cpu_bus);
+        const irq_cycles = self.cpu.irq(&self.bus);
         if (irq_cycles > 0) {
             total_cpu_cycles += irq_cycles;
-            total_cpu_cycles += try self.advanceDevices(irq_cycles, &cpu_bus);
+            total_cpu_cycles += try self.advanceDevices(irq_cycles, &self.bus);
         }
     }
     const frame_complete = self.ppu.takeFrameComplete();
@@ -148,6 +149,79 @@ pub fn loadSaveRam(self: *Nes, data: []const u8) !void {
     return error.NoCartridgeLoaded;
 }
 
+pub fn saveState(self: *const Nes, allocator: std.mem.Allocator) ![]u8 {
+    var state = std.Io.Writer.Allocating.init(allocator);
+    defer state.deinit();
+    const writer = &state.writer;
+
+    try writer.writeAll(state_magic);
+    try State.writeValue(writer, state_version);
+    try State.writeValue(writer, self.cpu);
+    try saveBusState(writer, &self.bus);
+
+    var ppu = self.ppu;
+    ppu.mapper = null;
+    try State.writeValue(writer, ppu);
+
+    try State.writeValue(writer, self.apu);
+    try State.writeValue(writer, self.input);
+    try State.writeValue(writer, self.timing);
+    try State.writeValue(writer, self.ppu_clock_accumulator);
+
+    if (self.cart) |*cart| {
+        try State.writeValue(writer, true);
+        const cart_state = try cart.saveState(self.allocator);
+        defer self.allocator.free(cart_state);
+        try State.writeValue(writer, @as(u32, @intCast(cart_state.len)));
+        try writer.writeAll(cart_state);
+    } else {
+        try State.writeValue(writer, false);
+    }
+
+    return state.toOwnedSlice();
+}
+
+pub fn loadState(self: *Nes, data: []const u8) !void {
+    var state = std.Io.Reader.fixed(data);
+    const reader = &state;
+    try State.expectBytes(reader, state_magic);
+    if ((try State.readValue(reader, u8)) != state_version) return State.Error.UnsupportedStateVersion;
+
+    const cpu = try State.readValue(reader, mos6502.Cpu);
+    const bus_state = try loadBusState(reader);
+    var ppu = try State.readValue(reader, Ppu);
+    const apu = try State.readValue(reader, Apu);
+    const input = try State.readValue(reader, Ppu.InputState);
+    const timing = try State.readValue(reader, Timing);
+    const ppu_clock_accumulator = try State.readValue(reader, u64);
+    const has_cart = try State.readValue(reader, bool);
+
+    if (has_cart) {
+        if (self.cart) |*cart| {
+            const cart_state_len = try State.readValue(reader, u32);
+            const cart_state = try State.readBytes(reader, cart_state_len);
+            try cart.loadState(cart_state);
+        } else {
+            return error.NoCartridgeLoaded;
+        }
+    } else if (self.cart != null) {
+        return State.Error.StateKindMismatch;
+    }
+    try State.done(reader);
+
+    ppu.mapper = null;
+    self.cpu = cpu;
+    restoreBusState(&self.bus, bus_state);
+    self.ppu = ppu;
+    self.apu = apu;
+    self.input = input;
+    self.timing = timing;
+    self.ppu_clock_accumulator = ppu_clock_accumulator;
+    self.frame_audio_count = 0;
+    self.step_audio_count = 0;
+    self.connectDevices();
+}
+
 fn latchInput(self: *Nes) void {
     self.bus.setControllerState(0, self.input.toNesControllerByte());
 }
@@ -164,7 +238,7 @@ fn appendStepAudio(self: *Nes, audio: []const f32) !void {
     self.step_audio_count += audio.len;
 }
 
-fn advanceDevices(self: *Nes, cycles: u32, cpu_bus: *mos6502.Bus) !u32 {
+fn advanceDevices(self: *Nes, cycles: u32, cpu_bus: anytype) !u32 {
     var extra_cycles: u32 = 0;
     var pending = cycles;
 
@@ -214,6 +288,42 @@ fn connectDevices(self: *Nes) void {
     }
 }
 
+const BusState = struct {
+    ram: [2048]u8,
+    controller_state: [2]u8,
+    controller_shift: [2]u8,
+    controller_reads: [2]u8,
+    controller_strobe: bool,
+    dma_stall_cycles: u16,
+    cpu_cycle_is_odd: bool,
+};
+
+fn saveBusState(writer: *std.Io.Writer, bus: *const Bus) !void {
+    try State.writeValue(writer, BusState{
+        .ram = bus.ram,
+        .controller_state = bus.controller_state,
+        .controller_shift = bus.controller_shift,
+        .controller_reads = bus.controller_reads,
+        .controller_strobe = bus.controller_strobe,
+        .dma_stall_cycles = bus.dma_stall_cycles,
+        .cpu_cycle_is_odd = bus.cpu_cycle_is_odd,
+    });
+}
+
+fn loadBusState(reader: *std.Io.Reader) !BusState {
+    return State.readValue(reader, BusState);
+}
+
+fn restoreBusState(bus: *Bus, state: BusState) void {
+    bus.ram = state.ram;
+    bus.controller_state = state.controller_state;
+    bus.controller_shift = state.controller_shift;
+    bus.controller_reads = state.controller_reads;
+    bus.controller_strobe = state.controller_strobe;
+    bus.dma_stall_cycles = state.dma_stall_cycles;
+    bus.cpu_cycle_is_odd = state.cpu_cycle_is_odd;
+}
+
 fn makeTestRom(allocator: std.mem.Allocator, flags6: u8, chr_banks: u8) ![]u8 {
     const prg_size = 16 * 1024;
     const chr_size = @as(usize, chr_banks) * 8 * 1024;
@@ -242,6 +352,7 @@ fn makeMapper1TestRom(allocator: std.mem.Allocator) ![]u8 {
     data[4] = 8;
     data[5] = 0;
     data[6] = 0x12;
+    data[16] = 0xea;
     data[16 + 0x3ffc] = 0x00;
     data[16 + 0x3ffd] = 0x80;
     return data;
@@ -322,6 +433,79 @@ test "NES stepFrame resets frame audio between frames" {
     try std.testing.expect(first_audio_len > 0);
     try std.testing.expect(second.audio.len > 0);
     try std.testing.expect(second.audio.len < max_frame_audio_samples);
+}
+
+test "NES state round trips after frame with device and mapper state" {
+    const allocator = std.testing.allocator;
+    const rom = try makeMapper1TestRom(allocator);
+    defer allocator.free(rom);
+
+    var nes = Nes.init(allocator);
+    defer nes.deinit();
+
+    try nes.load(rom);
+    nes.reset();
+    _ = try nes.stepFrame();
+
+    nes.cpu.a = 0x34;
+    nes.bus.ram[0x10] = 0x56;
+    nes.ppu.vram[0x20] = 0x78;
+    nes.apu.status = 0x0f;
+    nes.input = .{ .a = true, .start = true };
+    nes.bus.write(0x6000, 0x9a);
+    nes.bus.write(0x8000, 0x80);
+    nes.bus.write(0xe000, 1);
+    nes.bus.write(0xe000, 0);
+    nes.bus.write(0xe000, 1);
+    nes.bus.write(0xe000, 0);
+    nes.bus.write(0xe000, 0);
+
+    const state = try nes.saveState(allocator);
+    defer allocator.free(state);
+
+    nes.cpu.a = 0;
+    nes.bus.ram[0x10] = 0;
+    nes.ppu.vram[0x20] = 0;
+    nes.apu.status = 0;
+    nes.input = .{};
+    nes.bus.write(0x6000, 0);
+    nes.bus.write(0x8000, 0x80);
+
+    try nes.loadState(state);
+
+    try std.testing.expectEqual(@as(u8, 0x34), nes.cpu.a);
+    try std.testing.expectEqual(@as(u8, 0x56), nes.bus.ram[0x10]);
+    try std.testing.expectEqual(@as(u8, 0x78), nes.ppu.vram[0x20]);
+    try std.testing.expectEqual(@as(u8, 0x0f), nes.apu.status);
+    try std.testing.expect(nes.input.a);
+    try std.testing.expect(nes.input.start);
+    try std.testing.expectEqual(@as(u8, 0x9a), nes.bus.read(0x6000));
+    try std.testing.expectEqual(@as(u5, 0x05), nes.cart.?.mapper.mmc1.prg_bank);
+    try std.testing.expectEqual(@as(usize, 0), nes.frame_audio_count);
+    try std.testing.expectEqual(@as(usize, 0), nes.step_audio_count);
+    try std.testing.expect(nes.bus.mapper != null);
+    try std.testing.expect(nes.ppu.mapper != null);
+}
+
+test "NES state loading rejects malformed payloads" {
+    const allocator = std.testing.allocator;
+    const rom = try makeTestRom(allocator, 0x00, 1);
+    defer allocator.free(rom);
+
+    var nes = Nes.init(allocator);
+    defer nes.deinit();
+    try nes.load(rom);
+    nes.reset();
+
+    const state = try nes.saveState(allocator);
+    defer allocator.free(state);
+
+    try std.testing.expectError(State.Error.InvalidState, nes.loadState(state[0 .. state.len - 1]));
+
+    const wrong_version = try allocator.dupe(u8, state);
+    defer allocator.free(wrong_version);
+    wrong_version[state_magic.len] = state_version + 1;
+    try std.testing.expectError(State.Error.UnsupportedStateVersion, nes.loadState(wrong_version));
 }
 
 test "NES loads CHR RAM cartridges" {
@@ -415,8 +599,7 @@ test "interrupt cycles advance every device" {
     nes.ppu.scanline = 241;
     nes.ppu.cycles = 0;
 
-    var cpu_bus = mos6502.Bus.init(&nes.bus);
-    const extra = try nes.advanceDevices(1, &cpu_bus);
+    const extra = try nes.advanceDevices(1, &nes.bus);
 
     try std.testing.expectEqual(@as(u32, 7), extra);
     try std.testing.expectEqual(@as(u32, 24), nes.ppu.cycles);

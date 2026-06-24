@@ -35,7 +35,7 @@ pub fn build(b: *std.Build) void {
     const ppu_mod = b.createModule(.{
         .target = target,
         .optimize = optimize,
-        .root_source_file = b.path("src/ppu/ppu.zig"),
+        .root_source_file = b.path("src/ppu.zig"),
         .imports = &.{
             .{ .name = "cartridge", .module = cartridge_mod },
             .{ .name = "timing", .module = timing_mod },
@@ -66,14 +66,10 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    const ppu_input_mod = b.createModule(.{
-        .target = target,
-        .optimize = optimize,
-        .root_source_file = b.path("src/ppu/input_state.zig"),
-    });
+
 
     const test_step = b.step("test", "Run 6soz-nes tests");
-    inline for (&.{ nes_mod, bus_mod, cartridge_mod, ppu_mod, ppu_input_mod, apu_mod, timing_mod }) |test_mod| {
+    inline for (&.{ nes_mod, bus_mod, cartridge_mod, ppu_mod, apu_mod, timing_mod }) |test_mod| {
         const test_cmd = b.addTest(.{ .root_module = test_mod });
         const run_test = b.addRunArtifact(test_cmd);
         test_step.dependOn(&run_test.step);

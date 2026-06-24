@@ -10,19 +10,22 @@ The project provides a Zig library module for loading and stepping NES state, wi
 
 - Mapper 0 (NROM)
 - Mapper 1 (MMC1)
+- Mapper 2 (UxROM)
 - Mapper 3 (CNROM)
 - Mapper 4 (MMC3) - Initial support
+- Mapper 7 (AxROM)
 
 ### Other Features
 - iNES and NES 2.0 header parsing
 - CHR ROM and CHR RAM
 - Horizontal, vertical, and single-screen nametable mirroring
 - Save RAM import/export for host-managed battery saves
+- Save-state serialization/deserialization for host-managed state files
 - NTSC and PAL timing profiles
 
 ## Usage
 
-The core is designed to be host-agnostic. Host applications can persist battery-backed saves by reading `Nes.saveRam()` and restoring it with `Nes.loadSaveRam()`.
+The core is designed to be host-agnostic. Host applications can persist battery-backed saves by reading `Nes.saveRam()` and restoring it with `Nes.loadSaveRam()`. Runtime state can be snapshotted with `Nes.saveState()` and restored with `Nes.loadState()` against the same loaded ROM.
 
 Typical host loop:
 

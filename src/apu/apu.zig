@@ -4,8 +4,6 @@ const Pulse = @import("pulse.zig");
 const Triangle = @import("triangle.zig");
 const Noise = @import("noise.zig");
 const Dmc = @import("dmc.zig");
-const DcBlocker = @import("dc_blocker.zig");
-const OnePoleLowPass = @import("one_pole_low_pass.zig");
 const Timing = @import("timing");
 
 const Apu = @This();
@@ -256,3 +254,24 @@ test "DMC raises IRQ at sample end when enabled" {
     apu.writeRegister(0x4015, 0);
     try std.testing.expect(!apu.pollIrq());
 }
+
+const DcBlocker = struct {
+    prev_input: f32 = 0,
+    prev_output: f32 = 0,
+
+    pub fn process(self: *DcBlocker, input: f32) f32 {
+        const output = input - self.prev_input + 0.995 * self.prev_output;
+        self.prev_input = input;
+        self.prev_output = output;
+        return output;
+    }
+};
+
+const OnePoleLowPass = struct {
+    state: f32 = 0,
+
+    pub fn process(self: *OnePoleLowPass, input: f32) f32 {
+        self.state += (input - self.state) * 0.20;
+        return self.state;
+    }
+};
