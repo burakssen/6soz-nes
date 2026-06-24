@@ -3,7 +3,7 @@
     .version = "0.0.1",
     .dependencies = .{
         .mos6502 = .{
-            .url = "git+https://github.com/burakssen/6soz-mos6502#ecb1be909838d8b285fe6fe28ead81586ee71926",
+            .url = "git+https://github.com/burakssen/6soz-mos6502#36893d69f7d15a30e8fa002df30ae59f91f48c57",
             .hash = "_6soz_mos6502-0.0.1-TdAexi-CAABX4xiG7NVwsXKH-H9-ew4Unrhb4OP_-rj-",
         },
     },
