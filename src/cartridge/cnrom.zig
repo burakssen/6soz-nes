@@ -1,4 +1,4 @@
-const common = @import("common.zig");
+const cartridge = @import("cartridge.zig");
 const std = @import("std");
 
 const Cnrom = @This();
@@ -9,7 +9,7 @@ const chr_bank_size = 8 * 1024;
 prg_rom: []const u8,
 chr: []u8,
 chr_is_ram: bool,
-mirroring_mode: common.Mirroring,
+mirroring_mode: cartridge.Mirroring,
 
 chr_bank: u8 = 0,
 
@@ -41,7 +41,7 @@ pub fn chrWrite(self: *Cnrom, addr: u16, val: u8) void {
     self.chr[self.getChrAddr(addr)] = val;
 }
 
-pub fn mirroring(self: *const Cnrom) common.Mirroring {
+pub fn mirroring(self: *const Cnrom) cartridge.Mirroring {
     return self.mirroring_mode;
 }
 
@@ -117,5 +117,5 @@ test "CNROM reports header mirroring" {
         .mirroring_mode = .vertical,
     };
 
-    try std.testing.expectEqual(common.Mirroring.vertical, mapper.mirroring());
+    try std.testing.expectEqual(cartridge.Mirroring.vertical, mapper.mirroring());
 }

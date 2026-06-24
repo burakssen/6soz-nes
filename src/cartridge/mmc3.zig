@@ -1,4 +1,4 @@
-const common = @import("common.zig");
+const cartridge = @import("cartridge.zig");
 const std = @import("std");
 
 const Mmc3 = @This();
@@ -10,7 +10,7 @@ prg_ram: []u8,
 
 bank_select: u8 = 0,
 bank_registers: [8]u8 = [_]u8{0} ** 8,
-mirroring_mode: common.Mirroring = .horizontal,
+mirroring_mode: cartridge.Mirroring = .horizontal,
 prg_ram_protect: u8 = 0,
 
 irq_latch: u8 = 0,
@@ -94,7 +94,7 @@ pub fn ppuA12(self: *Mmc3, addr: u16) void {
     self.updateIrq(addr);
 }
 
-pub fn mirroring(self: *const Mmc3) common.Mirroring {
+pub fn mirroring(self: *const Mmc3) cartridge.Mirroring {
     return self.mirroring_mode;
 }
 
@@ -205,10 +205,10 @@ test "MMC3 updates mirroring from register writes" {
     };
 
     mapper.prgWrite(0xa000, 0);
-    try std.testing.expectEqual(common.Mirroring.vertical, mapper.mirroring());
+    try std.testing.expectEqual(cartridge.Mirroring.vertical, mapper.mirroring());
 
     mapper.prgWrite(0xa000, 1);
-    try std.testing.expectEqual(common.Mirroring.horizontal, mapper.mirroring());
+    try std.testing.expectEqual(cartridge.Mirroring.horizontal, mapper.mirroring());
 }
 
 test "MMC3 gates PRG RAM reads and writes" {
@@ -276,4 +276,89 @@ test "MMC3 raises and clears IRQ on A12 edges" {
 
     mapper.prgWrite(0xe000, 0);
     try std.testing.expect(!mapper.irq_active);
+}
+
+test "MMC3 IRQ counter reload, decrement, and disable/enable behavior" {
+    var chr: [8 * 1024]u8 = [_]u8{0} ** (8 * 1024);
+    var mapper = Mmc3{
+        .prg_rom = &[_]u8{0} ** (32 * 1024),
+        .chr = &chr,
+        .chr_is_ram = false,
+        .prg_ram = &[_]u8{},
+    };
+
+    // 1. Set irq_latch = 3
+    mapper.prgWrite(0xc000, 3);
+    // 2. Enable IRQ
+    mapper.prgWrite(0xe001, 0);
+
+    // Initially irq_counter is 0, so the first rising A12 edge should reload irq_counter to latch value (3).
+    // It should not trigger an IRQ because 3 != 0.
+    mapper.ppuA12(0x1000);
+    try std.testing.expectEqual(@as(u8, 3), mapper.irq_counter);
+    try std.testing.expect(!mapper.irq_active);
+
+    // 2nd A12 rising edge
+    mapper.ppuA12(0x0000);
+    mapper.ppuA12(0x1000);
+    try std.testing.expectEqual(@as(u8, 2), mapper.irq_counter);
+    try std.testing.expect(!mapper.irq_active);
+
+    // 3rd A12 rising edge
+    mapper.ppuA12(0x0000);
+    mapper.ppuA12(0x1000);
+    try std.testing.expectEqual(@as(u8, 1), mapper.irq_counter);
+    try std.testing.expect(!mapper.irq_active);
+
+    // 4th A12 rising edge: decrements to 0, triggers IRQ
+    mapper.ppuA12(0x0000);
+    mapper.ppuA12(0x1000);
+    try std.testing.expectEqual(@as(u8, 0), mapper.irq_counter);
+    try std.testing.expect(mapper.irq_active);
+
+    // Set irq_latch = 5
+    mapper.prgWrite(0xc000, 5);
+    // Set reload flag
+    mapper.prgWrite(0xc001, 0);
+
+    // 5th A12 rising edge: reloads to 5 because of the reload flag
+    mapper.ppuA12(0x0000);
+    mapper.ppuA12(0x1000);
+    try std.testing.expectEqual(@as(u8, 5), mapper.irq_counter);
+
+    // Disable IRQ: should clear active status
+    mapper.prgWrite(0xe000, 0);
+    try std.testing.expect(!mapper.irq_active);
+    try std.testing.expect(!mapper.irq_enabled);
+
+    // Pulse A12 5 times.
+    // 1st pulse: counter decrements to 4
+    mapper.ppuA12(0x0000); mapper.ppuA12(0x1000);
+    // 2nd pulse: counter decrements to 3
+    mapper.ppuA12(0x0000); mapper.ppuA12(0x1000);
+    // 3rd pulse: counter decrements to 2
+    mapper.ppuA12(0x0000); mapper.ppuA12(0x1000);
+    // 4th pulse: counter decrements to 1
+    mapper.ppuA12(0x0000); mapper.ppuA12(0x1000);
+    // 5th pulse: counter decrements to 0. Since irq_enabled is false, irq_active must stay false.
+    mapper.ppuA12(0x0000); mapper.ppuA12(0x1000);
+    try std.testing.expectEqual(@as(u8, 0), mapper.irq_counter);
+    try std.testing.expect(!mapper.irq_active);
+
+    // Enable IRQs again: irq_active should still be false
+    mapper.prgWrite(0xe001, 0);
+    try std.testing.expect(!mapper.irq_active);
+
+    // Request reload and pulse to set counter to 5 again
+    mapper.prgWrite(0xc001, 0);
+    mapper.ppuA12(0x0000); mapper.ppuA12(0x1000);
+    try std.testing.expectEqual(@as(u8, 5), mapper.irq_counter);
+
+    // Pulse A12 5 times. On the 5th, it decrements to 0 and triggers IRQ since it's enabled.
+    mapper.ppuA12(0x0000); mapper.ppuA12(0x1000); // 4
+    mapper.ppuA12(0x0000); mapper.ppuA12(0x1000); // 3
+    mapper.ppuA12(0x0000); mapper.ppuA12(0x1000); // 2
+    mapper.ppuA12(0x0000); mapper.ppuA12(0x1000); // 1
+    mapper.ppuA12(0x0000); mapper.ppuA12(0x1000); // 0
+    try std.testing.expect(mapper.irq_active);
 }

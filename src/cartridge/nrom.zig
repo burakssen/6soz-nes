@@ -1,11 +1,11 @@
-const common = @import("common.zig");
+const cartridge = @import("cartridge.zig");
 
 const Nrom = @This();
 
 prg_rom: []const u8,
 chr: []u8,
 chr_is_ram: bool,
-mirroring_mode: common.Mirroring,
+mirroring_mode: cartridge.Mirroring,
 
 pub fn prgRead(self: *const Nrom, addr: u16) u8 {
     if (self.prg_rom.len == 0) return 0;
@@ -26,6 +26,6 @@ pub fn chrWrite(self: *Nrom, addr: u16, val: u8) void {
     }
 }
 
-pub fn mirroring(self: *const Nrom) common.Mirroring {
+pub fn mirroring(self: *const Nrom) cartridge.Mirroring {
     return self.mirroring_mode;
 }

@@ -1,9 +1,8 @@
 const std = @import("std");
 
-const utils = @import("utils.zig");
 
-const Envelope = @import("envelope.zig");
-const Sweep = @import("sweep.zig");
+
+// Inline definitions are placed at the end of the file.
 
 const Pulse = @This();
 
@@ -25,7 +24,7 @@ pub fn write(self: *Pulse, reg: u16, value: u8) void {
         2 => self.timer_period = (self.timer_period & 0x0700) | value,
         3 => {
             self.timer_period = (self.timer_period & 0x00ff) | (@as(u16, value & 0x07) << 8);
-            if (self.enabled) self.length_counter = utils.lengthTable(value >> 3);
+            if (self.enabled) self.length_counter = lengthTable(value >> 3);
             self.duty_step = 0;
             self.envelope.restart();
         },
@@ -93,3 +92,79 @@ fn pulseDuty(duty: u2, step: u3) u1 {
     };
     return @truncate((table[duty] >> (7 - step)) & 1);
 }
+
+fn lengthTable(index: u8) u8 {
+    const table = [_]u8{
+        10,  254, 20, 2,  40, 4,  80, 6,
+        160, 8,   60, 10, 14, 12, 26, 14,
+        12,  16,  24, 18, 48, 20, 96, 22,
+        192, 24,  72, 26, 16, 28, 32, 30,
+    };
+    return table[index & 0x1f];
+}
+
+const Envelope = struct {
+    reg: u8 = 0,
+    divider: u8 = 0,
+    decay: u4 = 0,
+    start: bool = false,
+
+    pub fn write(self: *Envelope, value: u8) void {
+        self.reg = value;
+    }
+
+    pub fn restart(self: *Envelope) void {
+        self.start = true;
+    }
+
+    pub fn clock(self: *Envelope) void {
+        if (self.start) {
+            self.start = false;
+            self.decay = 15;
+            self.divider = self.period();
+            return;
+        }
+
+        if (self.divider != 0) {
+            self.divider -= 1;
+            return;
+        }
+
+        self.divider = self.period();
+        if (self.decay != 0) {
+            self.decay -= 1;
+        } else if (self.length_halt()) {
+            self.decay = 15;
+        }
+    }
+
+    pub fn volume(self: *const Envelope) u4 {
+        if ((self.reg & 0x10) != 0) return @truncate(self.reg & 0x0f);
+        return self.decay;
+    }
+
+    fn period(self: *const Envelope) u8 {
+        return self.reg & 0x0f;
+    }
+
+    pub fn length_halt(self: *const Envelope) bool {
+        return (self.reg & 0x20) != 0;
+    }
+};
+
+const Sweep = struct {
+    enabled: bool = false,
+    period: u3 = 0,
+    negate: bool = false,
+    shift: u3 = 0,
+    divider: u3 = 0,
+    reload: bool = false,
+
+    pub fn write(self: *Sweep, value: u8) void {
+        self.enabled = (value & 0x80) != 0;
+        self.period = @truncate((value >> 4) & 0x07);
+        self.negate = (value & 0x08) != 0;
+        self.shift = @truncate(value & 0x07);
+        self.reload = true;
+    }
+};

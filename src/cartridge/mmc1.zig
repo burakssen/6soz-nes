@@ -1,4 +1,4 @@
-const common = @import("common.zig");
+const cartridge = @import("cartridge.zig");
 const std = @import("std");
 
 const Mmc1 = @This();
@@ -55,7 +55,7 @@ pub fn chrWrite(self: *Mmc1, addr: u16, val: u8) void {
     self.chr[self.getChrAddr(addr) % self.chr.len] = val;
 }
 
-pub fn mirroring(self: *const Mmc1) common.Mirroring {
+pub fn mirroring(self: *const Mmc1) cartridge.Mirroring {
     return switch (self.control & 0x03) {
         0 => .single_screen_lower,
         1 => .single_screen_upper,
@@ -144,7 +144,7 @@ test "MMC1 commits serial register after five writes" {
     writeSerial(&mapper, 0x8000, 0x02);
 
     try std.testing.expectEqual(@as(u5, 0x02), mapper.control);
-    try std.testing.expectEqual(common.Mirroring.vertical, mapper.mirroring());
+    try std.testing.expectEqual(cartridge.Mirroring.vertical, mapper.mirroring());
 }
 
 test "MMC1 reset clears shift register and forces PRG mode bits" {
@@ -282,16 +282,16 @@ test "MMC1 reports all mirroring modes" {
     };
 
     writeSerial(&mapper, 0x8000, 0x00);
-    try std.testing.expectEqual(common.Mirroring.single_screen_lower, mapper.mirroring());
+    try std.testing.expectEqual(cartridge.Mirroring.single_screen_lower, mapper.mirroring());
 
     writeSerial(&mapper, 0x8000, 0x01);
-    try std.testing.expectEqual(common.Mirroring.single_screen_upper, mapper.mirroring());
+    try std.testing.expectEqual(cartridge.Mirroring.single_screen_upper, mapper.mirroring());
 
     writeSerial(&mapper, 0x8000, 0x02);
-    try std.testing.expectEqual(common.Mirroring.vertical, mapper.mirroring());
+    try std.testing.expectEqual(cartridge.Mirroring.vertical, mapper.mirroring());
 
     writeSerial(&mapper, 0x8000, 0x03);
-    try std.testing.expectEqual(common.Mirroring.horizontal, mapper.mirroring());
+    try std.testing.expectEqual(cartridge.Mirroring.horizontal, mapper.mirroring());
 }
 
 test "MMC1 PRG RAM reads and writes" {

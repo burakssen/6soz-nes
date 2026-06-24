@@ -3,8 +3,8 @@
     .version = "0.0.1",
     .dependencies = .{
         .mos6502 = .{
-            .url = "git+https://github.com/burakssen/6soz-mos6502#1af1f6b55a2c23779676f76537213063f7b12244",
-            .hash = "_6soz_mos6502-0.0.1-TdAexoOKAACl3qeJXUg2-HlQhyGvWwOlGvR6qmp3TaXz",
+            .url = "git+https://github.com/burakssen/6soz-mos6502#ecb1be909838d8b285fe6fe28ead81586ee71926",
+            .hash = "_6soz_mos6502-0.0.1-TdAexi-CAABX4xiG7NVwsXKH-H9-ew4Unrhb4OP_-rj-",
         },
     },
     .minimum_zig_version = "0.16.0",

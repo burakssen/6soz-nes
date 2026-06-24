@@ -1,8 +1,37 @@
 const std = @import("std");
 
-pub const Video = @import("video.zig");
-pub const InputState = @import("input_state.zig");
-pub const StepResult = @import("step_result.zig");
+pub const Video = struct {
+    pub const width = 256;
+    pub const height = 240;
+    pub const Pixel = u32;
+    pub const Framebuffer = [width * height]Pixel;
+};
+pub const InputState = struct {
+    a: bool = false,
+    b: bool = false,
+    select: bool = false,
+    start: bool = false,
+    up: bool = false,
+    down: bool = false,
+    left: bool = false,
+    right: bool = false,
+
+    pub fn toNesControllerByte(self: InputState) u8 {
+        return (if (self.a) @as(u8, 1) else 0) |
+            (if (self.b) @as(u8, 2) else 0) |
+            (if (self.select) @as(u8, 4) else 0) |
+            (if (self.start) @as(u8, 8) else 0) |
+            (if (self.up) @as(u8, 16) else 0) |
+            (if (self.down) @as(u8, 32) else 0) |
+            (if (self.left) @as(u8, 64) else 0) |
+            (if (self.right) @as(u8, 128) else 0);
+    }
+};
+pub const StepResult = struct {
+    cycles: u32,
+    audio: []const f32 = &.{},
+    frame_complete: bool = false,
+};
 
 const Cartridge = @import("cartridge");
 
@@ -60,6 +89,8 @@ framebuffer: Video.Framebuffer = [_]u32{0} ** (Video.width * Video.height),
 
 scanline_sprites: [8]usize = [_]usize{0} ** 8,
 scanline_sprite_count: u4 = 0,
+scanline_sprite_patterns_lo: [8]u8 = [_]u8{0} ** 8,
+scanline_sprite_patterns_hi: [8]u8 = [_]u8{0} ** 8,
 
 pub fn readRegister(self: *Ppu, addr: u16) u8 {
     return switch (registerAddr(addr)) {
@@ -330,7 +361,7 @@ fn renderPixel(self: *Ppu, x_pos: u16, y_pos: u16) u32 {
         bg_palette = (a1 << 1) | a0;
     }
 
-    const sprite = self.spritePixel(x_pos, y_pos);
+    const sprite = if (self.scanline_sprite_count > 0) self.spritePixel(x_pos, y_pos) else SpritePixel{};
     if (sprite.zero_hit and bg_pixel != 0 and sprite.pixel != 0 and x_pos < 255) {
         self.status |= 0x40;
     }
@@ -354,30 +385,24 @@ const SpritePixel = struct {
 };
 
 fn spritePixel(self: *Ppu, x_pos: u16, y_pos: u16) SpritePixel {
+    _ = y_pos;
     if ((self.mask & 0x10) == 0) return .{};
     if (x_pos < 8 and (self.mask & 0x04) == 0) return .{};
 
-    const sprite_height: i16 = if ((self.ctrl & 0x20) != 0) 16 else 8;
     var slot: usize = 0;
     while (slot < self.scanline_sprite_count) : (slot += 1) {
         const i = self.scanline_sprites[slot];
         const base = i * 4;
-        const sprite_y = @as(i16, self.oam[base]) + 1;
-        const row = @as(i16, @intCast(y_pos)) - sprite_y;
-        if (row < 0 or row >= sprite_height) continue;
 
         const sprite_x = self.oam[base + 3];
         if (x_pos < sprite_x or x_pos >= @as(u16, sprite_x) + 8) continue;
 
         const attr = self.oam[base + 2];
-        var tile_row = @as(u8, @intCast(row));
         var tile_col = @as(u8, @intCast(x_pos - sprite_x));
-        if ((attr & 0x80) != 0) tile_row = @as(u8, @intCast(sprite_height - 1)) - tile_row;
         if ((attr & 0x40) != 0) tile_col = 7 - tile_col;
 
-        const tile_addr = self.spritePatternAddress(self.oam[base + 1], tile_row);
-        const lo = self.vramRead(tile_addr);
-        const hi = self.vramRead(tile_addr + 8);
+        const lo = self.scanline_sprite_patterns_lo[slot];
+        const hi = self.scanline_sprite_patterns_hi[slot];
         const shift = @as(u3, @intCast(7 - tile_col));
         const pixel = ((hi >> shift) & 1) << 1 | ((lo >> shift) & 1);
         if (pixel == 0) continue;
@@ -416,7 +441,19 @@ fn evaluateSpriteOverflow(self: *Ppu, y_pos: u16) void {
         if (row >= 0 and row < sprite_height) {
             visible += 1;
             if (self.scanline_sprite_count < self.scanline_sprites.len) {
-                self.scanline_sprites[@as(usize, self.scanline_sprite_count)] = i;
+                const slot = @as(usize, self.scanline_sprite_count);
+                self.scanline_sprites[slot] = i;
+
+                // Prefetch pattern bytes for this sprite
+                const base = i * 4;
+                const attr = self.oam[base + 2];
+                var tile_row = @as(u8, @intCast(row));
+                if ((attr & 0x80) != 0) tile_row = @as(u8, @intCast(sprite_height - 1)) - tile_row;
+
+                const tile_addr = self.spritePatternAddress(self.oam[base + 1], tile_row);
+                self.scanline_sprite_patterns_lo[slot] = self.vramRead(tile_addr);
+                self.scanline_sprite_patterns_hi[slot] = self.vramRead(tile_addr + 8);
+
                 self.scanline_sprite_count += 1;
             }
             if (visible > 8) {
@@ -599,4 +636,15 @@ test "8x16 sprite pattern address uses tile bit zero as pattern table select" {
     try std.testing.expectEqual(@as(u16, 0x0030), ppu.spritePatternAddress(0x02, 8));
     try std.testing.expectEqual(@as(u16, 0x1020), ppu.spritePatternAddress(0x03, 0));
     try std.testing.expectEqual(@as(u16, 0x1030), ppu.spritePatternAddress(0x03, 8));
+}
+
+test "input state converts to NES controller byte order" {
+    const input = InputState{
+        .a = true,
+        .start = true,
+        .up = true,
+        .right = true,
+    };
+
+    try std.testing.expectEqual(@as(u8, 0b1001_1001), input.toNesControllerByte());
 }
