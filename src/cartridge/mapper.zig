@@ -6,7 +6,9 @@ const Mmc1 = @import("mmc1.zig");
 const Cnrom = @import("cnrom.zig");
 const Mmc3 = @import("mmc3.zig");
 const Uxrom = @import("uxrom.zig");
+const Unrom512 = @import("unrom512.zig");
 const Axrom = @import("axrom.zig");
+const Fme7 = @import("fme7.zig");
 const State = @import("state_io.zig");
 
 pub const Mapper = union(enum) {
@@ -15,7 +17,9 @@ pub const Mapper = union(enum) {
     cnrom: Cnrom,
     mmc3: Mmc3,
     uxrom: Uxrom,
+    unrom512: Unrom512,
     axrom: Axrom,
+    fme7: Fme7,
 
     pub fn prgRead(self: *Mapper, addr: u16) u8 {
         return switch (self.*) {
@@ -99,6 +103,21 @@ pub const Mapper = union(enum) {
                 try State.writeValue(writer, m.prg_bank);
                 try State.writeValue(writer, m.mirroring_select);
             },
+            .unrom512 => |m| {
+                try State.writeValue(writer, @as(u8, 30));
+                try State.writeValue(writer, m.prg_bank);
+                try State.writeValue(writer, m.mirroring_mode);
+            },
+            .fme7 => |m| {
+                try State.writeValue(writer, @as(u8, 69));
+                try State.writeValue(writer, m.command);
+                try State.writeValue(writer, m.chr_banks);
+                try State.writeValue(writer, m.prg_ram_control);
+                try State.writeValue(writer, m.prg_banks);
+                try State.writeValue(writer, m.mirroring_mode);
+                try State.writeValue(writer, m.irq_control);
+                try State.writeValue(writer, m.irq_counter);
+            },
         }
     }
 
@@ -140,6 +159,21 @@ pub const Mapper = union(enum) {
                 if (tag != 7) return State.Error.StateKindMismatch;
                 m.prg_bank = try State.readValue(reader, u3);
                 m.mirroring_select = try State.readValue(reader, u1);
+            },
+            .unrom512 => |*m| {
+                if (tag != 30) return State.Error.StateKindMismatch;
+                m.prg_bank = try State.readValue(reader, u8);
+                m.mirroring_mode = try State.readValue(reader, cartridge.Mirroring);
+            },
+            .fme7 => |*m| {
+                if (tag != 69) return State.Error.StateKindMismatch;
+                m.command = try State.readValue(reader, u4);
+                m.chr_banks = try State.readValue(reader, [8]u8);
+                m.prg_ram_control = try State.readValue(reader, u8);
+                m.prg_banks = try State.readValue(reader, [3]u8);
+                m.mirroring_mode = try State.readValue(reader, cartridge.Mirroring);
+                m.irq_control = try State.readValue(reader, u8);
+                m.irq_counter = try State.readValue(reader, u16);
             },
         }
     }

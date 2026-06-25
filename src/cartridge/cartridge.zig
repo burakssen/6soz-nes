@@ -174,8 +174,11 @@ pub fn load(allocator: std.mem.Allocator, data: []const u8) !Cartridge {
         parseInes(data[0..16]);
 
     if (header.mirroring == .four_screen) return error.UnsupportedMirroring;
-    if (header.timing_mode == .multiple or header.timing_mode == .dendy)
-        return error.UnsupportedTimingMode;
+    if (header.timing_mode == .dendy) return error.UnsupportedTimingMode;
+    const timing_mode: TimingMode = switch (header.timing_mode) {
+        .multiple => .ntsc,
+        else => header.timing_mode,
+    };
     if (header.mapper_id == 0 and header.prg_size != prg_bank_size and header.prg_size != 2 * prg_bank_size)
         return error.InvalidPrgSize;
 
@@ -279,6 +282,19 @@ pub fn load(allocator: std.mem.Allocator, data: []const u8) !Cartridge {
             .chr = chr,
             .chr_is_ram = header.chr_rom_size == 0,
         } },
+        30 => Mapper{ .unrom512 = .{
+            .prg_rom = prg_rom,
+            .chr = chr,
+            .chr_is_ram = header.chr_rom_size == 0,
+            .mirroring_mode = .single_screen_lower,
+        } },
+        69 => Mapper{ .fme7 = .{
+            .prg_rom = prg_rom,
+            .chr = chr,
+            .chr_is_ram = header.chr_rom_size == 0,
+            .prg_ram = prg_ram,
+            .mirroring_mode = header.mirroring,
+        } },
         else => return error.UnsupportedMapper,
     };
 
@@ -289,7 +305,7 @@ pub fn load(allocator: std.mem.Allocator, data: []const u8) !Cartridge {
         .mapper = mapper,
         .mapper_id = header.mapper_id,
         .submapper_id = header.submapper_id,
-        .timing_mode = header.timing_mode,
+        .timing_mode = timing_mode,
         .has_battery = save_ram_len > 0,
         .save_ram_start = save_ram_start,
         .save_ram_len = save_ram_len,
@@ -458,6 +474,78 @@ test "loads mapper 3 CNROM ROM" {
     try std.testing.expectEqual(@as(u8, 0x84), cartridge.mapper.chrRead(0x0000));
 }
 
+test "loads mapper 30 UNROM-512 ROM" {
+    const allocator = std.testing.allocator;
+    const prg_size = 512 * 1024;
+
+    var data = try allocator.alloc(u8, 16 + prg_size);
+    defer allocator.free(data);
+    @memset(data, 0);
+    @memcpy(data[0..4], "NES\x1a");
+    data[4] = 32;
+    data[5] = 0;
+    data[6] = 0xe2;
+    data[7] = 0x10;
+    data[16] = 0x30;
+    data[16 + prg_bank_size] = 0x31;
+    data[16 + prg_size - prg_bank_size] = 0xfe;
+
+    var cartridge = try Cartridge.load(allocator, data);
+    defer cartridge.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u16, 30), cartridge.mapper_id);
+    try std.testing.expectEqual(@as(usize, prg_size), cartridge.prg_rom.len);
+    try std.testing.expect(cartridge.mapper.unrom512.chr_is_ram);
+    try std.testing.expectEqual(@as(u8, 0x30), cartridge.mapper.prgRead(0x8000));
+    try std.testing.expectEqual(@as(u8, 0xfe), cartridge.mapper.prgRead(0xc000));
+
+    cartridge.mapper.prgWrite(0x8000, 0x21);
+    try std.testing.expectEqual(@as(u8, 0x31), cartridge.mapper.prgRead(0x8000));
+    try std.testing.expectEqual(Mirroring.single_screen_upper, cartridge.mapper.mirroring());
+}
+
+test "loads mapper 69 FME-7 ROM with PRG and CHR banking" {
+    const allocator = std.testing.allocator;
+    const prg_size = 128 * 1024;
+
+    var data = try allocator.alloc(u8, 16 + prg_size);
+    defer allocator.free(data);
+    @memset(data, 0);
+    @memcpy(data[0..4], "NES\x1a");
+    data[4] = 8;
+    data[5] = 0;
+    data[6] = 0x53;
+    data[7] = 0x48;
+    data[10] = 0x90;
+    data[11] = 0x07;
+    data[16] = 0x40;
+    data[16 + 3 * 8 * 1024] = 0x43;
+    data[16 + prg_size - 8 * 1024] = 0xff;
+
+    var cartridge = try Cartridge.load(allocator, data);
+    defer cartridge.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u16, 69), cartridge.mapper_id);
+    try std.testing.expectEqual(@as(usize, 32 * 1024), cartridge.prg_ram.len);
+    try std.testing.expectEqual(@as(usize, chr_bank_size), cartridge.chr.len);
+    try std.testing.expectEqual(@as(u8, 0x40), cartridge.mapper.prgRead(0x8000));
+    try std.testing.expectEqual(@as(u8, 0xff), cartridge.mapper.prgRead(0xe000));
+
+    cartridge.mapper.prgWrite(0x8000, 0x09);
+    cartridge.mapper.prgWrite(0xa000, 0x03);
+    try std.testing.expectEqual(@as(u8, 0x43), cartridge.mapper.prgRead(0x8000));
+
+    cartridge.mapper.prgWrite(0x8000, 0x0c);
+    cartridge.mapper.prgWrite(0xa000, 0x03);
+    try std.testing.expectEqual(Mirroring.single_screen_upper, cartridge.mapper.mirroring());
+
+    cartridge.mapper.prgWrite(0x8000, 0x00);
+    cartridge.mapper.prgWrite(0xa000, 0x01);
+    cartridge.mapper.chrWrite(0, 0x5a);
+    try std.testing.expectEqual(@as(u8, 0x5a), cartridge.chr[1024]);
+    try std.testing.expectEqual(@as(u8, 0x5a), cartridge.mapper.chrRead(0));
+}
+
 test "rejects unsupported mapper" {
     const allocator = std.testing.allocator;
     const prg_size = 16 * 1024;
@@ -472,6 +560,26 @@ test "rejects unsupported mapper" {
     data[6] = 0x50;
 
     try std.testing.expectError(error.UnsupportedMapper, Cartridge.load(allocator, data));
+}
+
+test "loads NES 2.0 multi-region ROM as NTSC" {
+    const allocator = std.testing.allocator;
+    const prg_size = 16 * 1024;
+    const chr_size = 8 * 1024;
+
+    var data = try allocator.alloc(u8, 16 + prg_size + chr_size);
+    defer allocator.free(data);
+    @memset(data, 0);
+    @memcpy(data[0..4], "NES\x1a");
+    data[4] = 1;
+    data[5] = 1;
+    data[7] = 0x08;
+    data[12] = 0x02;
+
+    var cartridge = try Cartridge.load(allocator, data);
+    defer cartridge.deinit(allocator);
+
+    try std.testing.expectEqual(TimingMode.ntsc, cartridge.timing_mode);
 }
 
 test "loads mapper 1 MMC1 ROM with default PRG RAM and CHR RAM" {
@@ -730,7 +838,7 @@ test "legacy iNES TV flag selects PAL timing" {
     try std.testing.expectEqual(TimingMode.pal, cartridge.timing_mode);
 }
 
-test "rejects unsupported NES 2.0 timing modes" {
+test "rejects Dendy NES 2.0 timing mode" {
     const allocator = std.testing.allocator;
     const prg_size = 16 * 1024;
     const chr_size = 8 * 1024;
@@ -742,7 +850,7 @@ test "rejects unsupported NES 2.0 timing modes" {
     data[4] = 1;
     data[5] = 1;
     data[7] = 0x08;
-    data[12] = 2;
+    data[12] = 3;
 
     try std.testing.expectError(error.UnsupportedTimingMode, Cartridge.load(allocator, data));
 }
