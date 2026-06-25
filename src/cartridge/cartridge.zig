@@ -22,6 +22,7 @@ const Cartridge = @This();
 
 const prg_bank_size = 16 * 1024;
 const chr_bank_size = 8 * 1024;
+const unrom512_chr_ram_size = 4 * chr_bank_size;
 
 prg_rom: []u8,
 chr: []u8,
@@ -202,6 +203,8 @@ pub fn load(allocator: std.mem.Allocator, data: []const u8) !Cartridge {
 
     const chr_size = if (header.chr_rom_size > 0)
         header.chr_rom_size
+    else if (header.mapper_id == 30 and (!is_nes2 or header.chr_ram_size + header.chr_nvram_size == 0))
+        unrom512_chr_ram_size
     else if (is_nes2)
         std.math.add(usize, header.chr_ram_size, header.chr_nvram_size) catch
             return error.InvalidHeader
@@ -495,12 +498,19 @@ test "loads mapper 30 UNROM-512 ROM" {
 
     try std.testing.expectEqual(@as(u16, 30), cartridge.mapper_id);
     try std.testing.expectEqual(@as(usize, prg_size), cartridge.prg_rom.len);
+    try std.testing.expectEqual(@as(usize, unrom512_chr_ram_size), cartridge.chr.len);
     try std.testing.expect(cartridge.mapper.unrom512.chr_is_ram);
     try std.testing.expectEqual(@as(u8, 0x30), cartridge.mapper.prgRead(0x8000));
     try std.testing.expectEqual(@as(u8, 0xfe), cartridge.mapper.prgRead(0xc000));
 
+    cartridge.mapper.unrom512.chrWrite(0x0000, 0x10);
+    cartridge.mapper.prgWrite(0x8000, 0x40);
+    cartridge.mapper.unrom512.chrWrite(0x0000, 0x40);
+    try std.testing.expectEqual(@as(u8, 0x40), cartridge.mapper.chrRead(0x0000));
+
     cartridge.mapper.prgWrite(0x8000, 0x21);
     try std.testing.expectEqual(@as(u8, 0x31), cartridge.mapper.prgRead(0x8000));
+    try std.testing.expectEqual(@as(u8, 0x10), cartridge.mapper.chrRead(0x0000));
     try std.testing.expectEqual(Mirroring.single_screen_upper, cartridge.mapper.mirroring());
 }
 

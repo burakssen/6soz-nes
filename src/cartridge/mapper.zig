@@ -106,6 +106,7 @@ pub const Mapper = union(enum) {
             .unrom512 => |m| {
                 try State.writeValue(writer, @as(u8, 30));
                 try State.writeValue(writer, m.prg_bank);
+                try State.writeValue(writer, m.chr_bank);
                 try State.writeValue(writer, m.mirroring_mode);
             },
             .fme7 => |m| {
@@ -163,6 +164,7 @@ pub const Mapper = union(enum) {
             .unrom512 => |*m| {
                 if (tag != 30) return State.Error.StateKindMismatch;
                 m.prg_bank = try State.readValue(reader, u8);
+                m.chr_bank = try State.readValue(reader, u2);
                 m.mirroring_mode = try State.readValue(reader, cartridge.Mirroring);
             },
             .fme7 => |*m| {
@@ -178,3 +180,35 @@ pub const Mapper = union(enum) {
         }
     }
 };
+
+test "UNROM-512 mapper state round-trips CHR bank" {
+    var prg_rom: [32 * 16 * 1024]u8 = [_]u8{0} ** (32 * 16 * 1024);
+    var chr: [4 * 8 * 1024]u8 = [_]u8{0} ** (4 * 8 * 1024);
+    var mapper = Mapper{ .unrom512 = .{
+        .prg_rom = &prg_rom,
+        .chr = &chr,
+        .chr_is_ram = true,
+        .mirroring_mode = .single_screen_lower,
+    } };
+
+    mapper.prgWrite(0x8000, 0xe7);
+
+    var state = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer state.deinit();
+    try mapper.saveState(&state.writer);
+    const bytes = try state.toOwnedSlice();
+    defer std.testing.allocator.free(bytes);
+
+    var restored = Mapper{ .unrom512 = .{
+        .prg_rom = &prg_rom,
+        .chr = &chr,
+        .chr_is_ram = true,
+        .mirroring_mode = .single_screen_lower,
+    } };
+    var reader = std.Io.Reader.fixed(bytes);
+    try restored.loadState(&reader);
+
+    try std.testing.expectEqual(@as(u8, 0x07), restored.unrom512.prg_bank);
+    try std.testing.expectEqual(@as(u2, 0x03), restored.unrom512.chr_bank);
+    try std.testing.expectEqual(cartridge.Mirroring.single_screen_upper, restored.unrom512.mirroring());
+}
