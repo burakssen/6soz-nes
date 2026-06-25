@@ -6,6 +6,7 @@ pub const Video = struct {
     pub const Pixel = u32;
     pub const Framebuffer = [width * height]Pixel;
 };
+
 pub const InputState = struct {
     a: bool = false,
     b: bool = false,
@@ -86,11 +87,26 @@ bg_shifter_attrib_lo: u16 = 0,
 bg_shifter_attrib_hi: u16 = 0,
 
 framebuffer: Video.Framebuffer = [_]u32{0} ** (Video.width * Video.height),
+display_buffer: Video.Framebuffer = [_]u32{0} ** (Video.width * Video.height),
 
 scanline_sprites: [8]usize = [_]usize{0} ** 8,
 scanline_sprite_count: u4 = 0,
 scanline_sprite_patterns_lo: [8]u8 = [_]u8{0} ** 8,
 scanline_sprite_patterns_hi: [8]u8 = [_]u8{0} ** 8,
+
+pub fn displayFramebuffer(self: *const Ppu) []const u32 {
+    const src = &self.framebuffer;
+        const dst = @constCast(&self.display_buffer);
+    const row_width: usize = Video.width;
+    const crop: usize = 8;
+    const display_width: usize = row_width - crop * 2;
+    for (0..Video.height) |row| {
+        const src_row = src[row * row_width + crop ..];
+        const dst_row = dst[row * display_width ..];
+        @memcpy(dst_row[0..display_width], src_row[0..display_width]);
+    }
+    return dst[0 .. display_width * Video.height];
+}
 
 pub fn readRegister(self: *Ppu, addr: u16) u8 {
     return switch (registerAddr(addr)) {
@@ -187,8 +203,12 @@ fn vramRead(self: *Ppu, addr: u16) u8 {
 }
 
 fn fetchPattern(self: *Ppu, addr: u16) u8 {
-    if (self.mapper) |m| m.ppuA12(addr & 0x3FFF);
+    self.notifyPatternAddress(addr);
     return self.vramRead(addr);
+}
+
+fn notifyPatternAddress(self: *Ppu, addr: u16) void {
+    if (self.mapper) |m| m.ppuA12(addr & 0x3FFF);
 }
 
 fn vramWrite(self: *Ppu, addr: u16, val: u8) void {
@@ -213,6 +233,10 @@ fn registerAddr(addr: u16) u16 {
 }
 
 pub fn tick(self: *Ppu) bool {
+    return self.tickWithOddFrameSkip(false);
+}
+
+pub fn tickWithOddFrameSkip(self: *Ppu, skip_odd_frame_dot: bool) bool {
     if (self.scanline >= -1 and self.scanline < 240) {
         if (self.scanline == -1 and self.cycles == 1) {
             self.status &= 0x1F; // Clear flags
@@ -254,6 +278,7 @@ pub fn tick(self: *Ppu) bool {
         if (self.cycles == 256) self.incrementScrollY();
         if (self.cycles == 257) self.transferAddressX();
         if (self.scanline == -1 and self.cycles >= 280 and self.cycles < 305) self.transferAddressY();
+        self.notifySpritePatternFetch();
     }
 
     if (self.scanline == 241 and self.cycles == 1) {
@@ -266,6 +291,10 @@ pub fn tick(self: *Ppu) bool {
     }
 
     self.cycles += 1;
+    if (skip_odd_frame_dot and self.scanline == -1 and self.cycles == 340 and self.timing.region == .ntsc and (self.mask & 0x18) != 0) {
+        self.cycles = 0;
+        self.scanline = 0;
+    }
     if (self.cycles >= 341) {
         self.cycles = 0;
         self.scanline += 1;
@@ -377,6 +406,19 @@ fn renderPixel(self: *Ppu, x_pos: u16, y_pos: u16) u32 {
     return palette_table[color & 0x3F];
 }
 
+fn notifySpritePatternFetch(self: *Ppu) void {
+    if ((self.mask & 0x18) == 0) return;
+    if (self.cycles < 257 or self.cycles > 320) return;
+
+    const fetch_cycle = (self.cycles - 257) % 8;
+    if (fetch_cycle != 3 and fetch_cycle != 5) return;
+
+    const slot = @as(usize, (self.cycles - 257) / 8);
+    const base_addr = self.spriteFetchPatternAddress(slot);
+    const addr = base_addr + if (fetch_cycle == 5) @as(u16, 8) else @as(u16, 0);
+    self.notifyPatternAddress(addr);
+}
+
 const SpritePixel = struct {
     pixel: u8 = 0,
     palette: u8 = 0,
@@ -428,6 +470,29 @@ fn spritePatternAddress(self: *const Ppu, tile: u8, row: u8) u16 {
     const tile_base = @as(u16, tile & 0xfe) << 4;
     const tile_offset: u16 = if (row >= 8) 16 else 0;
     return bank + tile_base + tile_offset + (row & 0x07);
+}
+
+fn spriteFetchPatternAddress(self: *const Ppu, slot: usize) u16 {
+    if (self.scanline < 0) return self.dummySpritePatternAddress();
+    if (slot >= self.scanline_sprite_count) return self.dummySpritePatternAddress();
+
+    const i = self.scanline_sprites[slot];
+    const base = i * 4;
+    const sprite_height: i16 = if ((self.ctrl & 0x20) != 0) 16 else 8;
+    const sprite_y = @as(i16, self.oam[base]) + 1;
+    const row = self.scanline - sprite_y;
+    if (row < 0 or row >= sprite_height) return self.dummySpritePatternAddress();
+
+    const attr = self.oam[base + 2];
+    var tile_row = @as(u8, @intCast(row));
+    if ((attr & 0x80) != 0) tile_row = @as(u8, @intCast(sprite_height - 1)) - tile_row;
+    return self.spritePatternAddress(self.oam[base + 1], tile_row);
+}
+
+fn dummySpritePatternAddress(self: *const Ppu) u16 {
+    if ((self.ctrl & 0x20) != 0) return 0x1FE0;
+    const bank: u16 = if ((self.ctrl & 0x08) != 0) 0x1000 else 0;
+    return bank + 0x0FF0;
 }
 
 fn evaluateSpriteOverflow(self: *Ppu, y_pos: u16) void {
@@ -544,6 +609,42 @@ test "PPU reports frame completion when scanline wraps" {
     try std.testing.expect(!ppu.takeFrameComplete());
 }
 
+test "NTSC PPU can skip odd frame prerender dot when rendering is enabled" {
+    var ppu = Ppu{
+        .mask = 0x08,
+        .scanline = -1,
+        .cycles = 339,
+    };
+
+    try std.testing.expect(!ppu.tickWithOddFrameSkip(true));
+    try std.testing.expectEqual(@as(i16, 0), ppu.scanline);
+    try std.testing.expectEqual(@as(u32, 0), ppu.cycles);
+}
+
+test "PPU does not skip prerender dot when rendering is disabled" {
+    var ppu = Ppu{
+        .scanline = -1,
+        .cycles = 339,
+    };
+
+    try std.testing.expect(!ppu.tickWithOddFrameSkip(true));
+    try std.testing.expectEqual(@as(i16, -1), ppu.scanline);
+    try std.testing.expectEqual(@as(u32, 340), ppu.cycles);
+}
+
+test "PAL PPU does not skip odd frame prerender dot" {
+    var ppu = Ppu{
+        .mask = 0x08,
+        .scanline = -1,
+        .cycles = 339,
+        .timing = Timing.pal,
+    };
+
+    try std.testing.expect(!ppu.tickWithOddFrameSkip(true));
+    try std.testing.expectEqual(@as(i16, -1), ppu.scanline);
+    try std.testing.expectEqual(@as(u32, 340), ppu.cycles);
+}
+
 test "PAL PPU wraps after 312 scanlines" {
     var ppu = Ppu{
         .scanline = 310,
@@ -636,6 +737,29 @@ test "8x16 sprite pattern address uses tile bit zero as pattern table select" {
     try std.testing.expectEqual(@as(u16, 0x0030), ppu.spritePatternAddress(0x02, 8));
     try std.testing.expectEqual(@as(u16, 0x1020), ppu.spritePatternAddress(0x03, 0));
     try std.testing.expectEqual(@as(u16, 0x1030), ppu.spritePatternAddress(0x03, 8));
+}
+
+test "sprite pattern fetches notify MMC3 A12 tracking" {
+    var chr: [8 * 1024]u8 = [_]u8{0} ** (8 * 1024);
+    var mapper = Cartridge.Mapper{ .mmc3 = .{
+        .prg_rom = &[_]u8{0} ** (32 * 1024),
+        .chr = &chr,
+        .chr_is_ram = false,
+        .prg_ram = &[_]u8{},
+    } };
+    var ppu = Ppu{
+        .mapper = &mapper,
+        .mask = 0x18,
+        .ctrl = 0x08,
+        .scanline = 0,
+        .cycles = 260,
+    };
+
+    ppu.notifyPatternAddress(0x0000);
+    ppu.notifyPatternAddress(0x0000);
+    ppu.notifySpritePatternFetch();
+
+    try std.testing.expect(mapper.mmc3.last_a12);
 }
 
 test "input state converts to NES controller byte order" {

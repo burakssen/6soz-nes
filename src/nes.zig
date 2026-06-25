@@ -29,6 +29,7 @@ step_audio: [max_step_audio_samples]f32 = [_]f32{0} ** max_step_audio_samples,
 step_audio_count: usize = 0,
 timing: Timing = Timing.ntsc,
 ppu_clock_accumulator: u64 = 0,
+ppu_odd_frame: bool = false,
 
 pub fn init(allocator: std.mem.Allocator) Nes {
     return .{
@@ -43,12 +44,14 @@ pub fn init(allocator: std.mem.Allocator) Nes {
         .step_audio_count = 0,
         .timing = Timing.ntsc,
         .ppu_clock_accumulator = 0,
+        .ppu_odd_frame = false,
     };
 }
 
 pub fn reset(self: *Nes) void {
     self.connectDevices();
     self.ppu_clock_accumulator = 0;
+    self.ppu_odd_frame = false;
     self.cpu.reset(&self.bus);
 }
 
@@ -128,7 +131,7 @@ pub fn setInput(self: *Nes, input: Ppu.InputState) void {
 }
 
 pub fn framebuffer(self: *const Nes) []const u32 {
-    return &self.ppu.framebuffer;
+    return self.ppu.displayFramebuffer();
 }
 
 pub fn frameRate(self: *const Nes) u16 {
@@ -217,6 +220,7 @@ pub fn loadState(self: *Nes, data: []const u8) !void {
     self.input = input;
     self.timing = timing;
     self.ppu_clock_accumulator = ppu_clock_accumulator;
+    self.ppu_odd_frame = false;
     self.frame_audio_count = 0;
     self.step_audio_count = 0;
     self.connectDevices();
@@ -251,10 +255,14 @@ fn advanceDevices(self: *Nes, cycles: u32, cpu_bus: anytype) !u32 {
 
         var i: u64 = 0;
         while (i < ppu_ticks) : (i += 1) {
-            if (self.ppu.tick()) {
+            const was_frame_complete = self.ppu.frame_complete;
+            if (self.ppu.tickWithOddFrameSkip(self.ppu_odd_frame)) {
                 const nmi_cycles = self.cpu.nmi(cpu_bus);
                 extra_cycles += nmi_cycles;
                 pending += nmi_cycles;
+            }
+            if (!was_frame_complete and self.ppu.frame_complete) {
+                self.ppu_odd_frame = !self.ppu_odd_frame;
             }
         }
 
@@ -277,6 +285,7 @@ fn setTiming(self: *Nes, timing: Timing) void {
     self.ppu.timing = timing;
     self.apu.setTiming(timing);
     self.ppu_clock_accumulator = 0;
+    self.ppu_odd_frame = false;
 }
 
 fn connectDevices(self: *Nes) void {

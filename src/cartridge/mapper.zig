@@ -97,6 +97,7 @@ pub const Mapper = union(enum) {
                 try State.writeValue(writer, m.irq_enabled);
                 try State.writeValue(writer, m.irq_active);
                 try State.writeValue(writer, m.last_a12);
+                try State.writeValue(writer, m.a12_low_ticks);
             },
             .axrom => |m| {
                 try State.writeValue(writer, @as(u8, 7));
@@ -155,6 +156,10 @@ pub const Mapper = union(enum) {
                 m.irq_enabled = try State.readValue(reader, bool);
                 m.irq_active = try State.readValue(reader, bool);
                 m.last_a12 = try State.readValue(reader, bool);
+                m.a12_low_ticks = State.readValue(reader, u8) catch |err| switch (err) {
+                    State.Error.InvalidState => 3,
+                    else => |e| return e,
+                };
             },
             .axrom => |*m| {
                 if (tag != 7) return State.Error.StateKindMismatch;
