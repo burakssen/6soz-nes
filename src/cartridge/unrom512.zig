@@ -10,6 +10,7 @@ prg_rom: []const u8,
 chr: []u8,
 chr_is_ram: bool,
 mirroring_mode: cartridge.Mirroring,
+one_screen: bool = false, // ponytail: true when header specifies 1-screen switchable
 
 prg_bank: u8 = 0,
 chr_bank: u2 = 0,
@@ -32,7 +33,9 @@ pub fn prgWrite(self: *Unrom512, addr: u16, val: u8) void {
     switch (addr) {
         0x8000...0xffff => {
             self.prg_bank = val & 0x1f;
-            self.mirroring_mode = if ((val & 0x20) != 0) .single_screen_upper else .single_screen_lower;
+            if (self.one_screen) {
+                self.mirroring_mode = if ((val & 0x20) != 0) .single_screen_upper else .single_screen_lower;
+            }
             self.chr_bank = @truncate((val >> 6) & 0x03);
         },
         else => {},
@@ -99,6 +102,7 @@ test "UNROM-512 keeps PRG bank and mirroring bits independent from CHR bank" {
         .chr = &chr,
         .chr_is_ram = true,
         .mirroring_mode = .single_screen_lower,
+        .one_screen = true,
     };
 
     mapper.prgWrite(0x8000, 0x83);

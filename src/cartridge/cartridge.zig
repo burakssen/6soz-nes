@@ -174,7 +174,8 @@ pub fn load(allocator: std.mem.Allocator, data: []const u8) !Cartridge {
     else
         parseInes(data[0..16]);
 
-    if (header.mirroring == .four_screen) return error.UnsupportedMirroring;
+    // ponytail: mapper 30 uses the four-screen header bit for 1-screen switchable mode
+    if (header.mirroring == .four_screen and header.mapper_id != 30) return error.UnsupportedMirroring;
     if (header.timing_mode == .dendy) return error.UnsupportedTimingMode;
     const timing_mode: TimingMode = switch (header.timing_mode) {
         .multiple => .ntsc,
@@ -289,7 +290,8 @@ pub fn load(allocator: std.mem.Allocator, data: []const u8) !Cartridge {
             .prg_rom = prg_rom,
             .chr = chr,
             .chr_is_ram = header.chr_rom_size == 0,
-            .mirroring_mode = .single_screen_lower,
+            .mirroring_mode = if (header.mirroring == .four_screen) .single_screen_lower else header.mirroring,
+            .one_screen = header.mirroring == .four_screen,
         } },
         69 => Mapper{ .fme7 = .{
             .prg_rom = prg_rom,
@@ -477,7 +479,7 @@ test "loads mapper 3 CNROM ROM" {
     try std.testing.expectEqual(@as(u8, 0x84), cartridge.mapper.chrRead(0x0000));
 }
 
-test "loads mapper 30 UNROM-512 ROM" {
+test "loads mapper 30 UNROM-512 ROM with 1-screen mirroring" {
     const allocator = std.testing.allocator;
     const prg_size = 512 * 1024;
 
@@ -487,7 +489,7 @@ test "loads mapper 30 UNROM-512 ROM" {
     @memcpy(data[0..4], "NES\x1a");
     data[4] = 32;
     data[5] = 0;
-    data[6] = 0xe2;
+    data[6] = 0xea; // mapper low nibble 0xe + four-screen bit (1-screen for mapper 30) + battery
     data[7] = 0x10;
     data[16] = 0x30;
     data[16 + prg_bank_size] = 0x31;
@@ -500,6 +502,7 @@ test "loads mapper 30 UNROM-512 ROM" {
     try std.testing.expectEqual(@as(usize, prg_size), cartridge.prg_rom.len);
     try std.testing.expectEqual(@as(usize, unrom512_chr_ram_size), cartridge.chr.len);
     try std.testing.expect(cartridge.mapper.unrom512.chr_is_ram);
+    try std.testing.expect(cartridge.mapper.unrom512.one_screen);
     try std.testing.expectEqual(@as(u8, 0x30), cartridge.mapper.prgRead(0x8000));
     try std.testing.expectEqual(@as(u8, 0xfe), cartridge.mapper.prgRead(0xc000));
 
@@ -512,6 +515,33 @@ test "loads mapper 30 UNROM-512 ROM" {
     try std.testing.expectEqual(@as(u8, 0x31), cartridge.mapper.prgRead(0x8000));
     try std.testing.expectEqual(@as(u8, 0x10), cartridge.mapper.chrRead(0x0000));
     try std.testing.expectEqual(Mirroring.single_screen_upper, cartridge.mapper.mirroring());
+}
+
+test "loads mapper 30 UNROM-512 ROM with fixed horizontal mirroring" {
+    const allocator = std.testing.allocator;
+    const prg_size = 512 * 1024;
+
+    var data = try allocator.alloc(u8, 16 + prg_size);
+    defer allocator.free(data);
+    @memset(data, 0);
+    @memcpy(data[0..4], "NES\x1a");
+    data[4] = 32;
+    data[5] = 0;
+    data[6] = 0xe2; // mapper low nibble 0xe + battery, no four-screen bit -> horizontal
+    data[7] = 0x10;
+    data[16] = 0x30;
+    data[16 + prg_size - prg_bank_size] = 0xfe;
+
+    var cartridge = try Cartridge.load(allocator, data);
+    defer cartridge.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u16, 30), cartridge.mapper_id);
+    try std.testing.expect(!cartridge.mapper.unrom512.one_screen);
+    try std.testing.expectEqual(Mirroring.horizontal, cartridge.mapper.mirroring());
+
+    // Register bit 5 should NOT change mirroring in fixed mode
+    cartridge.mapper.prgWrite(0x8000, 0x21);
+    try std.testing.expectEqual(Mirroring.horizontal, cartridge.mapper.mirroring());
 }
 
 test "loads mapper 69 FME-7 ROM with PRG and CHR banking" {

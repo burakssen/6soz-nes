@@ -18,51 +18,53 @@ pub fn readValue(reader: *std.Io.Reader, comptime T: type) Error!T {
     return readTypedValue(reader, T);
 }
 
+pub fn readInto(reader: *std.Io.Reader, ptr: anytype) Error!void {
+    try readTypedValueInto(reader, @TypeOf(ptr.*), ptr);
+}
+
 pub fn readBytes(reader: *std.Io.Reader, len: usize) Error![]const u8 {
-    return reader.take(len) catch |err| switch (err) {
-        error.EndOfStream => Error.InvalidState,
-        error.ReadFailed => Error.InvalidState,
-    };
+    return reader.take(len) catch error.InvalidState;
 }
 
 pub fn expectBytes(reader: *std.Io.Reader, expected: []const u8) Error!void {
-    const actual = try readBytes(reader, expected.len);
-    if (!std.mem.eql(u8, actual, expected)) return Error.InvalidState;
+    if (!std.mem.eql(u8, try readBytes(reader, expected.len), expected))
+        return error.InvalidState;
 }
 
 pub fn done(reader: *const std.Io.Reader) Error!void {
-    if (reader.bufferedLen() != 0) return Error.InvalidState;
+    if (reader.bufferedLen() != 0) return error.InvalidState;
+}
+
+/// Returns the storage integer type for a given Int typeinfo,
+/// rounded up to the nearest power-of-two byte width (8/16/32/64 bits).
+fn storageInt(comptime info: std.builtin.Type.Int) type {
+    const width: u16 = if (info.bits <= 8) 8 else if (info.bits <= 16) 16 else if (info.bits <= 32) 32 else if (info.bits <= 64) 64 else @compileError("unsupported integer size");
+    return std.meta.Int(info.signedness, width);
 }
 
 fn writeTypedValue(writer: *std.Io.Writer, comptime T: type, value: T) Error!void {
     switch (@typeInfo(T)) {
         .bool => try writer.writeByte(if (value) 1 else 0),
-        .int => |info| try writeInt(writer, T, info, value),
+        .int => |info| try writeIntAs(writer, storageInt(info), @intCast(value)),
         .float => |info| switch (info.bits) {
             32 => try writeIntAs(writer, u32, @bitCast(value)),
             64 => try writeIntAs(writer, u64, @bitCast(value)),
             else => @compileError("unsupported float size"),
         },
         .@"enum" => |info| try writeTypedValue(writer, info.tag_type, @intFromEnum(value)),
-        .array => |info| {
-            for (value) |item| try writeTypedValue(writer, info.child, item);
-        },
-        .@"struct" => |info| {
-            inline for (info.fields) |field| {
-                try writeTypedValue(writer, field.type, @field(value, field.name));
-            }
-        },
+        .array => |info| for (value) |item| try writeTypedValue(writer, info.child, item),
+        .@"struct" => |info| inline for (info.fields) |f|
+            try writeTypedValue(writer, f.type, @field(value, f.name)),
         .optional => |info| {
-            if (@typeInfo(info.child) == .pointer) {
-                if (value != null) return Error.InvalidState;
+            if (comptime @typeInfo(info.child) == .pointer) {
+                // Pointer optionals are always null at serialization time
+                if (value != null) return error.InvalidState;
                 try writeTypedValue(writer, bool, false);
+            } else if (value) |child| {
+                try writeTypedValue(writer, bool, true);
+                try writeTypedValue(writer, info.child, child);
             } else {
-                if (value) |child| {
-                    try writeTypedValue(writer, bool, true);
-                    try writeTypedValue(writer, info.child, child);
-                } else {
-                    try writeTypedValue(writer, bool, false);
-                }
+                try writeTypedValue(writer, bool, false);
             }
         },
         .pointer => @compileError("pointers are not valid state fields"),
@@ -70,90 +72,61 @@ fn writeTypedValue(writer: *std.Io.Writer, comptime T: type, value: T) Error!voi
     }
 }
 
+// Thin wrapper so callers can get a return value instead of writing into a pointer.
 fn readTypedValue(reader: *std.Io.Reader, comptime T: type) Error!T {
-    return switch (@typeInfo(T)) {
-        .bool => blk: {
-            const b = reader.takeByte() catch |err| switch (err) {
-                error.EndOfStream => return Error.InvalidState,
-                error.ReadFailed => return Error.InvalidState,
-            };
-            if (b > 1) return Error.InvalidState;
-            break :blk b != 0;
+    var result: T = undefined;
+    try readTypedValueInto(reader, T, &result);
+    return result;
+}
+
+fn readTypedValueInto(reader: *std.Io.Reader, comptime T: type, out: *T) Error!void {
+    switch (@typeInfo(T)) {
+        .bool => {
+            const b = reader.takeByte() catch return error.InvalidState;
+            if (b > 1) return error.InvalidState;
+            out.* = b != 0;
         },
-        .int => |info| try readInt(reader, T, info),
+        .int => |info| {
+            out.* = std.math.cast(T, try readIntAs(reader, storageInt(info))) orelse
+                return error.InvalidState;
+        },
         .float => |info| switch (info.bits) {
-            32 => @bitCast(try readIntAs(reader, u32)),
-            64 => @bitCast(try readIntAs(reader, u64)),
+            32 => out.* = @bitCast(try readIntAs(reader, u32)),
+            64 => out.* = @bitCast(try readIntAs(reader, u64)),
             else => @compileError("unsupported float size"),
         },
-        .@"enum" => |info| blk: {
+        .@"enum" => |info| {
             const tag = try readTypedValue(reader, info.tag_type);
-            inline for (info.fields) |field| {
-                if (tag == field.value) break :blk @as(T, @enumFromInt(tag));
+            inline for (info.fields) |f| {
+                if (tag == f.value) {
+                    out.* = @enumFromInt(tag);
+                    return;
+                }
             }
-            return Error.InvalidState;
+            return error.InvalidState;
         },
-        .array => |info| blk: {
-            var result: T = undefined;
-            for (&result) |*item| item.* = try readTypedValue(reader, info.child);
-            break :blk result;
-        },
-        .@"struct" => |info| blk: {
-            var result: T = undefined;
-            inline for (info.fields) |field| {
-                @field(result, field.name) = try readTypedValue(reader, field.type);
-            }
-            break :blk result;
-        },
-        .optional => |info| blk: {
+        .array => |info| for (out) |*item| try readTypedValueInto(reader, info.child, item),
+        .@"struct" => |info| inline for (info.fields) |f|
+            try readTypedValueInto(reader, f.type, &@field(out.*, f.name)),
+        .optional => |info| {
             const present = try readTypedValue(reader, bool);
-            if (@typeInfo(info.child) == .pointer) {
-                if (present) return Error.InvalidState;
-                break :blk null;
+            if (comptime @typeInfo(info.child) == .pointer) {
+                // Pointer optionals are always null at serialization time
+                if (present) return error.InvalidState;
+                out.* = null;
+                return;
             }
-            if (!present) break :blk null;
-            break :blk try readTypedValue(reader, info.child);
+            if (!present) {
+                out.* = null;
+                return;
+            }
+            var child: info.child = undefined;
+            try readTypedValueInto(reader, info.child, &child);
+            out.* = child;
         },
         .pointer => @compileError("pointers are not valid state fields"),
         else => @compileError("unsupported state field: " ++ @typeName(T)),
-    };
-}
-
-fn writeInt(writer: *std.Io.Writer, comptime T: type, comptime info: std.builtin.Type.Int, value: T) Error!void {
-    if (info.signedness == .unsigned) {
-        if (info.bits <= 8) return writeIntAs(writer, u8, @intCast(value));
-        if (info.bits <= 16) return writeIntAs(writer, u16, @intCast(value));
-        if (info.bits <= 32) return writeIntAs(writer, u32, @intCast(value));
-        if (info.bits <= 64) return writeIntAs(writer, u64, @intCast(value));
-    } else {
-        if (info.bits <= 8) return writeIntAs(writer, i8, @intCast(value));
-        if (info.bits <= 16) return writeIntAs(writer, i16, @intCast(value));
-        if (info.bits <= 32) return writeIntAs(writer, i32, @intCast(value));
-        if (info.bits <= 64) return writeIntAs(writer, i64, @intCast(value));
     }
-    @compileError("unsupported integer size: " ++ @typeName(T));
-}
-
-fn readInt(reader: *std.Io.Reader, comptime T: type, comptime info: std.builtin.Type.Int) Error!T {
-    const raw = if (info.signedness == .unsigned and info.bits <= 8)
-        try readIntAs(reader, u8)
-    else if (info.signedness == .unsigned and info.bits <= 16)
-        try readIntAs(reader, u16)
-    else if (info.signedness == .unsigned and info.bits <= 32)
-        try readIntAs(reader, u32)
-    else if (info.signedness == .unsigned and info.bits <= 64)
-        try readIntAs(reader, u64)
-    else if (info.signedness == .signed and info.bits <= 8)
-        try readIntAs(reader, i8)
-    else if (info.signedness == .signed and info.bits <= 16)
-        try readIntAs(reader, i16)
-    else if (info.signedness == .signed and info.bits <= 32)
-        try readIntAs(reader, i32)
-    else if (info.signedness == .signed and info.bits <= 64)
-        try readIntAs(reader, i64)
-    else
-        @compileError("unsupported integer size: " ++ @typeName(T));
-    return std.math.cast(T, raw) orelse Error.InvalidState;
 }
 
 fn writeIntAs(writer: *std.Io.Writer, comptime T: type, value: T) Error!void {

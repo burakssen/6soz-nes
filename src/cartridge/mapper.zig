@@ -194,6 +194,7 @@ test "UNROM-512 mapper state round-trips CHR bank" {
         .chr = &chr,
         .chr_is_ram = true,
         .mirroring_mode = .single_screen_lower,
+        .one_screen = true,
     } };
 
     mapper.prgWrite(0x8000, 0xe7);
@@ -209,6 +210,7 @@ test "UNROM-512 mapper state round-trips CHR bank" {
         .chr = &chr,
         .chr_is_ram = true,
         .mirroring_mode = .single_screen_lower,
+        .one_screen = true,
     } };
     var reader = std.Io.Reader.fixed(bytes);
     try restored.loadState(&reader);

@@ -130,7 +130,7 @@ pub fn setInput(self: *Nes, input: Ppu.InputState) void {
     self.input = input;
 }
 
-pub fn framebuffer(self: *const Nes) []const u32 {
+pub fn framebuffer(self: *Nes) []const u32 {
     return self.ppu.displayFramebuffer();
 }
 
@@ -192,7 +192,8 @@ pub fn loadState(self: *Nes, data: []const u8) !void {
 
     const cpu = try State.readValue(reader, mos6502.Cpu);
     const bus_state = try loadBusState(reader);
-    var ppu = try State.readValue(reader, Ppu);
+    var ppu: Ppu = undefined;
+    try State.readInto(reader, &ppu);
     const apu = try State.readValue(reader, Apu);
     const input = try State.readValue(reader, Ppu.InputState);
     const timing = try State.readValue(reader, Timing);
@@ -381,7 +382,7 @@ test "NES loads, resets, steps, and exposes framebuffer" {
 
     try std.testing.expect(result.cycles > 0);
     try std.testing.expect(!result.frame_complete);
-    try std.testing.expectEqual(@as(usize, Ppu.Video.width * Ppu.Video.height), nes.framebuffer().len);
+    try std.testing.expectEqual(@as(usize, (Ppu.Video.width - 16) * Ppu.Video.height), nes.framebuffer().len);
 }
 
 test "PAL ROM selects PAL metadata and fractional PPU clocking" {
@@ -419,7 +420,7 @@ test "NES steps a complete frame" {
     try std.testing.expect(result.frame_complete);
     try std.testing.expect(result.cycles > 0);
     try std.testing.expect(result.audio.len > 0);
-    try std.testing.expectEqual(@as(usize, Ppu.Video.width * Ppu.Video.height), nes.framebuffer().len);
+    try std.testing.expectEqual(@as(usize, (Ppu.Video.width - 16) * Ppu.Video.height), nes.framebuffer().len);
 }
 
 test "NES stepFrame resets frame audio between frames" {

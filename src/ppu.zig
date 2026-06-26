@@ -94,9 +94,9 @@ scanline_sprite_count: u4 = 0,
 scanline_sprite_patterns_lo: [8]u8 = [_]u8{0} ** 8,
 scanline_sprite_patterns_hi: [8]u8 = [_]u8{0} ** 8,
 
-pub fn displayFramebuffer(self: *const Ppu) []const u32 {
+pub fn displayFramebuffer(self: *Ppu) []const u32 {
     const src = &self.framebuffer;
-        const dst = @constCast(&self.display_buffer);
+    const dst = &self.display_buffer;
     const row_width: usize = Video.width;
     const crop: usize = 8;
     const display_width: usize = row_width - crop * 2;
@@ -242,8 +242,13 @@ pub fn tickWithOddFrameSkip(self: *Ppu, skip_odd_frame_dot: bool) bool {
             self.status &= 0x1F; // Clear flags
         }
 
-        if (self.scanline >= 0 and self.scanline < 240 and self.cycles == 1) {
-            self.evaluateSpriteOverflow(@as(u16, @intCast(self.scanline)));
+        if (self.cycles == 257) {
+            const next_scanline = self.scanline + 1;
+            if (next_scanline >= 0 and next_scanline < 240) {
+                self.evaluateSpriteOverflow(@as(u16, @intCast(next_scanline)));
+            } else {
+                self.scanline_sprite_count = 0;
+            }
         }
 
         if ((self.cycles >= 2 and self.cycles < 258) or (self.cycles >= 321 and self.cycles < 338)) {
